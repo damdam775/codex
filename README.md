@@ -1,8 +1,8 @@
-<h1 align="center">OpenAI Codex CLI</h1>
+<h1 align="center">OpenAI Codex CLI, Windows compatible (no wsl) </h1>
 <p align="center">Lightweight coding agent that runs in your terminal</p>
 <p align="center"><strong>Windows optimized version</strong></p>
 
-<p align="center"><code>git clone --depth 1 https://github.com/openai/codex.git</code></p>
+<p align="center"><code>git clone https://github.com/damdam775/codex.git</code></p>
 <p align="center"><code>cd codex/codex-cli && npm install && npm run build && npm install -g .</code></p>
 
 ![Codex demo GIF using: codex "explain this codebase to me"](./.github/demo.gif)
@@ -79,7 +79,7 @@ This branch is optimized for Windows.
 Install this Windows build from GitHub:
 
 ```shell
-git clone --depth 1 https://github.com/openai/codex.git
+git clone https://github.com/damdam775/codex.git
 npm install -g ./codex/codex-cli
 ```
 
