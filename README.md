@@ -156,14 +156,15 @@ they'll be committed to your working directory.
 Windows users should run [`install_windows.bat`](./install_windows.bat), which
 invokes the PowerShell installer (`scripts/install_windows.ps1`). Make sure you
 have **Node.js 22 or newer** installed first. The script verifies the version,
-updates your `PATH`, writes a default `~/.codex/AGENTS.md`, and can install the
-CLI itself using the customized Windows build. It optionally installs voice
-packages and lets you select the default model provider, fetching Gemini model
-names when needed. A minimal Python helper for interactive prompts is provided
-at [`scripts/windows_agent.py`](./scripts/windows_agent.py). **Note:** The
-script adds Node and npm's global bin folder to your PATH. If running `codex`
-opens the JavaScript file in an editor, reinstall Node.js or run the setup
-script again to fix file associations.
+updates your `PATH`, writes a default `~/.codex/AGENTS.md`, and installs the
+Rust-based Codex CLI via `npm install -g @openai/codex@native`. During setup it
+creates a `~/.codex/config.toml`, letting you choose between OpenAI, Gemini, or
+Claude via OpenRouter (and prompting for API keys when needed). A minimal Python
+helper for interactive prompts is provided at
+[`scripts/windows_agent.py`](./scripts/windows_agent.py). **Note:** The script
+adds Node and npm's global bin folder to your PATH. If running `codex` opens the
+PowerShell script in an editor, reinstall Node.js or run the setup script again
+to fix file associations.
 
 
 ---
