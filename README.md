@@ -3,7 +3,7 @@
 <p align="center"><strong>Windows optimized version</strong></p>
 
 <p align="center"><code>git clone https://github.com/damdam775/codex.git</code></p>
-<p align="center"><code>cd codex/codex-cli && npm install && npm run build && npm install -g .</code></p>
+<p align="center"><code>cd codex && .\install_windows.bat</code></p>
 
 ![Codex demo GIF using: codex "explain this codebase to me"](./.github/demo.gif)
 
@@ -76,14 +76,15 @@ Help us improve by filing issues or submitting PRs (see the section below for ho
 
 This branch is optimized for Windows.
 
-Install this Windows build from GitHub:
+Install this Windows build from GitHub and run the bundled installer:
 
-```shell
+```powershell
 git clone https://github.com/damdam775/codex.git
-npm install -g ./codex/codex-cli
+cd codex
+./install_windows.bat
 ```
 
-**Important:** The `npm install -g` step puts a `codex` launcher into your npm global bin directory (e.g. `%AppData%\npm`). Make sure this directory is in your `PATH`. Do **not** add `codex-cli\bin` directly to `PATH`.
+The installer prompts for your preferred provider, captures any required API keys, writes `~/.codex/config.toml`, and installs the Rust-based Codex CLI via `npm install -g @openai/codex@native`. It also ensures Node.js and npm's global bin directory are on your `PATH`. If you skip the automatic CLI install step, you can rerun `install_windows.bat` later or install manually with `npm install -g @openai/codex@native` after Node.js is available.
 
 Next, set your OpenAI API key as an environment variable:
 
@@ -156,14 +157,15 @@ they'll be committed to your working directory.
 Windows users should run [`install_windows.bat`](./install_windows.bat), which
 invokes the PowerShell installer (`scripts/install_windows.ps1`). Make sure you
 have **Node.js 22 or newer** installed first. The script verifies the version,
-updates your `PATH`, writes a default `~/.codex/AGENTS.md`, and can install the
-CLI itself using the customized Windows build. It optionally installs voice
-packages and lets you select the default model provider, fetching Gemini model
-names when needed. A minimal Python helper for interactive prompts is provided
-at [`scripts/windows_agent.py`](./scripts/windows_agent.py). **Note:** The
-script adds Node and npm's global bin folder to your PATH. If running `codex`
-opens the JavaScript file in an editor, reinstall Node.js or run the setup
-script again to fix file associations.
+updates your `PATH`, writes a default `~/.codex/AGENTS.md`, and installs the
+Rust-based Codex CLI via `npm install -g @openai/codex@native`. During setup it
+creates a `~/.codex/config.toml`, letting you choose between OpenAI, Gemini, or
+Claude via OpenRouter (and prompting for API keys when needed). A minimal Python
+helper for interactive prompts is provided at
+[`scripts/windows_agent.py`](./scripts/windows_agent.py). **Note:** The script
+adds Node and npm's global bin folder to your PATH. If running `codex` opens the
+PowerShell script in an editor, reinstall Node.js or run the setup script again
+to fix file associations.
 
 
 ---
@@ -307,10 +309,11 @@ Below are a few bite-size examples you can copy-paste. Replace the text in quote
 <details open>
 <summary><strong>From npm (Recommended)</strong></summary>
 
-```bash
+```powershell
 # Customized Windows build
 git clone --depth 1 https://github.com/openai/codex.git
-npm install -g ./codex/codex-cli
+cd codex
+./install_windows.bat
 # Official npm package
 # npm install -g @openai/codex
 # or
