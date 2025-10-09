@@ -838,6 +838,13 @@ export default class TextBuffer {
       return false;
     }
 
+    const altGrPrintable =
+      Boolean(input) &&
+      key["ctrl"] &&
+      key["alt"] &&
+      !key["meta"] &&
+      isPrintableInput(input);
+
     /* new line — Ink sets either `key.return` *or* passes a literal "\n" */
     if (key["return"] || input === "\r" || input === "\n") {
       this.newline();
@@ -945,13 +952,6 @@ export default class TextBuffer {
       this.del();
     }
     // Normal input
-    const altGrPrintable =
-      Boolean(input) &&
-      key["ctrl"] &&
-      key["alt"] &&
-      !key["meta"] &&
-      isPrintableInput(input);
-
     else if (input && (!key["ctrl"] || altGrPrintable) && !key["meta"]) {
       this.insert(input);
     }
