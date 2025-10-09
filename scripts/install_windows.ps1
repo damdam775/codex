@@ -41,17 +41,37 @@ if ($installAudio) {
 }
 
 # Choose provider
-$providers = @("OpenAI","Claude","Gemini")
+$providers = @("OpenAI","Claude (via OpenRouter)","Gemini")
 Write-Host "Select default provider:" -ForegroundColor Cyan
 for ($i=0; $i -lt $providers.Count; $i++) { Write-Host "  [$($i+1)] $($providers[$i])" }
 $choice = Read-Host "Enter choice (1-3)"; if (-not $choice) { $choice = '1' }
 $provider = $providers[[int]$choice - 1]
-$config = @{ provider = $provider }
+
+$model = 'o4-mini'
+$providerKey = 'openai'
+$configBody = @()
 
 switch ($provider) {
-    'OpenAI' { $config.model = 'gpt-4o' }
-    'Claude' { $config.model = 'claude-3-opus-20240229' }
+    'OpenAI' {
+        $model = 'gpt-4o'
+        $providerKey = 'openai'
+    }
+    'Claude (via OpenRouter)' {
+        $model = 'anthropic/claude-3.5-sonnet'
+        $providerKey = 'openrouter'
+        $openrouterKey = $env:OPENROUTER_API_KEY
+        if (-not $openrouterKey) {
+            $openrouterKey = Read-Host "OpenRouter API key"
+            if ($openrouterKey) {
+                [Environment]::SetEnvironmentVariable('OPENROUTER_API_KEY',$openrouterKey,'User')
+                Write-Host "Stored OPENROUTER_API_KEY for future sessions" -ForegroundColor Green
+            } else {
+                Write-Host "OpenRouter key not provided. You can set OPENROUTER_API_KEY later." -ForegroundColor Yellow
+            }
+        }
+    }
     'Gemini' {
+        $providerKey = 'gemini'
         $token = Read-Host "Gemini API key"
         [Environment]::SetEnvironmentVariable('GEMINI_API_KEY',$token,'User')
         $models = @("models/gemini-1.5-pro-latest")
@@ -61,13 +81,16 @@ switch ($provider) {
         } catch { Write-Host "Could not fetch Gemini models: $_" -ForegroundColor Yellow }
         for ($i=0; $i -lt $models.Count; $i++) { Write-Host "  [$($i+1)] $($models[$i])" }
         $mChoice = Read-Host "Select Gemini model"; if (-not $mChoice) { $mChoice = '1' }
-        $config.model = $models[[int]$mChoice - 1]
-        $config.providers = @{ gemini = @{ name='Gemini'; baseURL='https://generativelanguage.googleapis.com/v1beta/openai'; envKey='GEMINI_API_KEY' } }
+        $model = $models[[int]$mChoice - 1]
     }
 }
 
-$configPath = Join-Path $codexDir "config.json"
-$config | ConvertTo-Json -Depth 3 | Out-File $configPath -Encoding UTF8
+$configBody += ("model = \"{0}\"" -f $model)
+$configBody += ("model_provider = \"{0}\"" -f $providerKey)
+
+$configContent = ($configBody -join "`n") + "`n"
+$configPath = Join-Path $codexDir "config.toml"
+$configContent | Set-Content -Path $configPath -Encoding UTF8
 Write-Host "Wrote configuration to $configPath" -ForegroundColor Green
 
 # Create default AGENTS.md with bilingual instructions
@@ -96,8 +119,7 @@ if ($env:PATH -notlike "*$npmBin*") {
 $respCli = Read-Host "Install Codex CLI now? [Y/n]"
 if ($respCli -match '^[Yy]' -or $respCli -eq '') {
     try {
-        $repo = "git+https://github.com/damdam775/codex.git#codex_windows_version:codex-cli"
-        npm install -g $repo | Out-Null
+        npm install -g @openai/codex@native | Out-Null
         $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
         if (-not $codexCmd) {
             Write-Host "CLI installed but 'codex' not found in PATH. Restart your terminal or check npm prefix." -ForegroundColor Yellow
