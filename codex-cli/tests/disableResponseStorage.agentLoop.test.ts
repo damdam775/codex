@@ -29,7 +29,7 @@ describe.each([
 ])("AgentLoop with disableResponseStorage=%s", ({ flag, title }) => {
   /* build a fresh config for each case */
   const cfg: AppConfig = {
-    model: "codex-mini-latest",
+    model: "o4-mini",
     provider: "openai",
     instructions: "",
     disableResponseStorage: flag,
