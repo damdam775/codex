@@ -46,7 +46,7 @@ describe("model-utils – offline resilience", () => {
 
     const supported = await isModelSupportedForResponses(
       "openai",
-      "codex-mini-latest",
+      "o4-mini",
     );
     expect(supported).toBe(true);
   });

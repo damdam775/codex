@@ -21,10 +21,7 @@ describe("disableResponseStorage persistence", () => {
     mkdirSync(codexDir, { recursive: true });
 
     // seed YAML with ZDR enabled
-    writeFileSync(
-      yamlPath,
-      "model: codex-mini-latest\ndisableResponseStorage: true\n",
-    );
+    writeFileSync(yamlPath, "model: o4-mini\ndisableResponseStorage: true\n");
   });
 
   afterAll((): void => {
