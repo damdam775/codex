@@ -18,7 +18,6 @@ import { generateCompactSummary } from "../../utils/compact-summary.js";
 import { saveConfig } from "../../utils/config.js";
 import { extractAppliedPatches as _extractAppliedPatches } from "../../utils/extract-applied-patches.js";
 import { getGitDiff } from "../../utils/get-diff.js";
-import { captureClipboardImage } from "../../utils/clipboard.js";
 import { createInputItem } from "../../utils/input-utils.js";
 import { log } from "../../utils/logger/log.js";
 import {
@@ -40,7 +39,7 @@ import chalk from "chalk";
 import fs from "fs/promises";
 import { Box, Text } from "ink";
 import { spawn } from "node:child_process";
-import React, { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import React, { useEffect, useMemo, useRef, useState } from "react";
 import { inspect } from "util";
 
 export type OverlayModeType =
@@ -207,17 +206,8 @@ export default function TerminalChat({
   const [diffText, _setDiffText] = useState<string>("");
 
   const [initialPrompt, setInitialPrompt] = useState(_initialPrompt);
-  const [pendingInitialImages, setPendingInitialImages] =
+  const [initialImagePaths, setInitialImagePaths] =
     useState(_initialImagePaths);
-  const [headerImagePaths, setHeaderImagePaths] = useState<Array<string>>(
-    () => _initialImagePaths?.slice() ?? [],
-  );
-  const [sessionImages, setSessionImages] = useState<
-    Array<{ token: string; path: string }>
-  >([]);
-  const nextImageIndexRef = useRef<number>(
-    (_initialImagePaths?.length ?? 0) + 1,
-  );
 
   const PWD = React.useMemo(() => shortCwd(), []);
 
@@ -416,33 +406,20 @@ export default function TerminalChat({
     const processInitialInputItems = async () => {
       if (
         (!initialPrompt || initialPrompt.trim() === "") &&
-        (!pendingInitialImages || pendingInitialImages.length === 0)
+        (!initialImagePaths || initialImagePaths.length === 0)
       ) {
         return;
       }
       const inputItems = [
-        await createInputItem(initialPrompt || "", pendingInitialImages || []),
+        await createInputItem(initialPrompt || "", initialImagePaths || []),
       ];
       // Clear them to prevent subsequent runs.
       setInitialPrompt("");
-      setPendingInitialImages([]);
+      setInitialImagePaths([]);
       agent?.run(inputItems);
     };
     processInitialInputItems();
-  }, [agent, initialPrompt, pendingInitialImages]);
-
-  const handleClipboardImagePaste = useCallback(async () => {
-    const filePath = await captureClipboardImage();
-    if (!filePath) {
-      return null;
-    }
-    const index = nextImageIndexRef.current;
-    nextImageIndexRef.current += 1;
-    const token = `[img_${index.toString().padStart(2, "0")}]`;
-    setSessionImages((prev) => [...prev, { token, path: filePath }]);
-    setHeaderImagePaths((prev) => [...prev, filePath]);
-    return { token, path: filePath };
-  }, []);
+  }, [agent, initialPrompt, initialImagePaths]);
 
   // ────────────────────────────────────────────────────────────────
   // In-app warning if CLI --model isn't in fetched list
@@ -516,7 +493,7 @@ export default function TerminalChat({
               approvalPolicy,
               colorsByPolicy,
               agent,
-              initialImagePaths: headerImagePaths,
+              initialImagePaths,
               flexModeEnabled: Boolean(config.flexMode),
             }}
             fileOpener={config.fileOpener}
@@ -602,9 +579,7 @@ export default function TerminalChat({
               return {};
             }}
             items={items}
-            sessionImages={sessionImages}
             thinkingSeconds={thinkingSeconds}
-            onPasteImageFromClipboard={handleClipboardImagePaste}
           />
         )}
         {overlayMode === "history" && (
