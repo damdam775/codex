@@ -155,6 +155,12 @@ export default function TerminalChat({
     initialApprovalPolicy,
   );
   const [thinkingSeconds, setThinkingSeconds] = useState(0);
+  const [interruptModeEnabled, setInterruptModeEnabled] = useState<boolean>(
+    false,
+  );
+  const [pendingInterruption, setPendingInterruption] =
+    useState<string | null>(null);
+  const [pendingAddendum, setPendingAddendum] = useState<string | null>(null);
 
   const handleCompact = async () => {
     setLoading(true);
@@ -354,6 +360,48 @@ export default function TerminalChat({
       }
     };
   }, [loading, confirmationPrompt]);
+
+  useEffect(() => {
+    if (!agent) {
+      return;
+    }
+    if (!loading && pendingInterruption) {
+      const text = pendingInterruption;
+      setPendingInterruption(null);
+      void (async () => {
+        const item = await createInputItem(text, []);
+        agent.run([item], lastResponseId || "");
+      })();
+    }
+  }, [agent, loading, pendingInterruption, lastResponseId]);
+
+  useEffect(() => {
+    if (!agent) {
+      return;
+    }
+    if (!loading && pendingAddendum) {
+      const text = pendingAddendum;
+      setPendingAddendum(null);
+      setItems((prev) => [
+        ...prev,
+        {
+          id: `user-add-${Date.now()}`,
+          type: "message",
+          role: "system",
+          content: [
+            {
+              type: "input_text",
+              text: `Before going further, know that the user also want to add that: ${text}`,
+            },
+          ],
+        },
+      ]);
+      void (async () => {
+        const item = await createInputItem(text, []);
+        agent.run([item], lastResponseId || "");
+      })();
+    }
+  }, [agent, loading, pendingAddendum, lastResponseId, setItems]);
 
   // Notify desktop with a preview when an assistant response arrives.
   const prevLoadingRef = useRef<boolean>(false);
@@ -605,6 +653,40 @@ export default function TerminalChat({
             sessionImages={sessionImages}
             thinkingSeconds={thinkingSeconds}
             onPasteImageFromClipboard={handleClipboardImagePaste}
+            interruptModeEnabled={interruptModeEnabled}
+            onToggleInterruptMode={setInterruptModeEnabled}
+            onSubmitInterjection={({ text, mode }) => {
+              if (!text.trim()) {
+                return;
+              }
+              if (mode === "interrupt") {
+                if (agent) {
+                  log(
+                    "TerminalChat: interrupting current run due to user interjection",
+                  );
+                  agent.cancel();
+                }
+                setLoading(false);
+                setPendingAddendum(null);
+                setPendingInterruption(text.trim());
+                setItems((prev) => [
+                  ...prev,
+                  {
+                    id: `user-interrupt-${Date.now()}`,
+                    type: "message",
+                    role: "system",
+                    content: [
+                      {
+                        type: "input_text",
+                        text: `Wait, it seems the user has something more to say: ${text.trim()}`,
+                      },
+                    ],
+                  },
+                ]);
+              } else {
+                setPendingAddendum(text.trim());
+              }
+            }}
           />
         )}
         {overlayMode === "history" && (
