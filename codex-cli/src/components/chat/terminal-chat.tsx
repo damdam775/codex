@@ -214,7 +214,6 @@ export default function TerminalChat({
   // Keep a single AgentLoop instance alive across renders;
   // recreate only when model/instructions/approvalPolicy change.
   const agentRef = React.useRef<AgentLoop>();
-  const agent = agentRef.current;
   const [, forceUpdate] = React.useReducer((c) => c + 1, 0); // trigger re‑render
 
   // ────────────────────────────────────────────────────────────────
@@ -392,6 +391,7 @@ export default function TerminalChat({
   }, [notify, loading, confirmationPrompt, items, PWD]);
 
   // Let's also track whenever the ref becomes available.
+  const agent = agentRef.current;
   useEffect(() => {
     log(`agentRef.current is now ${Boolean(agent)}`);
   }, [agent]);
