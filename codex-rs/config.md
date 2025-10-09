@@ -17,7 +17,7 @@ Both the `--config` flag and the `config.toml` file support the following option
 The model that Codex should use.
 
 ```toml
-model = "o3"  # overrides the default of "o4-mini"
+model = "o3"  # overrides the default of "codex-mini-latest"
 ```
 
 ## model_provider
@@ -139,7 +139,7 @@ Users can specify config values at multiple levels. Order of precedence is as fo
 1. custom command-line argument, e.g., `--model o3`
 2. as part of a profile, where the `--profile` is specified via a CLI (or in the config file itself)
 3. as an entry in `config.toml`, e.g., `model = "o3"`
-4. the default value that comes with Codex CLI (i.e., Codex CLI defaults to `o4-mini`)
+4. the default value that comes with Codex CLI (i.e., Codex CLI defaults to `codex-mini-latest`)
 
 ## model_reasoning_effort
 
