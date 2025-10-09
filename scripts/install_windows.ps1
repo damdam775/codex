@@ -85,12 +85,12 @@ switch ($provider) {
     }
 }
 
-$configBody += "model = \"$model\""
-$configBody += "model_provider = \"$providerKey\""
+$configBody += "model = `"$model`""
+$configBody += "model_provider = `"$providerKey`""
 
 $configContent = ($configBody -join "`n") + "`n"
 $configPath = Join-Path $codexDir "config.toml"
-$configContent | Set-Content -Encoding UTF8
+$configContent | Set-Content -Path $configPath -Encoding UTF8
 Write-Host "Wrote configuration to $configPath" -ForegroundColor Green
 
 # Create default AGENTS.md with bilingual instructions
