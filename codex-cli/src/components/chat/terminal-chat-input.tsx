@@ -23,14 +23,9 @@ import {
 } from "../../utils/storage/command-history.js";
 import { clearTerminal, onExit } from "../../utils/terminal.js";
 import { Box, Text, useApp, useInput, useStdin } from "ink";
+import { spawn, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import React, {
-  useCallback,
-  useState,
-  Fragment,
-  useEffect,
-  useRef,
-} from "react";
+import React, { useCallback, useState, Fragment, useEffect, useRef } from "react";
 import { useInterval } from "use-interval";
 
 const suggestions = [
@@ -40,6 +35,248 @@ const suggestions = [
 ];
 
 type SessionImageReference = { token: string; path: string };
+
+type DetectedImageMatch = {
+  key: string;
+  label: string;
+  originalText: string;
+  path: string | null;
+  start: number;
+};
+
+const IMAGE_EXTENSION_PATTERN = "(?:png|jpe?g|gif|bmp|webp|svg)";
+const IMAGE_URL_REGEX = new RegExp(
+  `https?:\\/\\/[^\\s)]+?\\.${IMAGE_EXTENSION_PATTERN}`,
+  "gi",
+);
+const IMAGE_PATH_REGEX = new RegExp(
+  `\\b(?:\\.[\\/\\\\]|[\\/\\\\]|[A-Za-z]:[\\/\\\\])[\\w.-]+(?:[\\/\\\\][\\w.-]+)*\\.${IMAGE_EXTENSION_PATTERN}\\b`,
+  "gi",
+);
+
+const PREVIEW_SCRIPT = `
+import sys
+import os
+import tkinter as tk
+from urllib.parse import urlparse
+from urllib.request import urlopen
+from io import BytesIO
+
+try:
+    from PIL import Image, ImageTk  # type: ignore
+    PIL_AVAILABLE = True
+except Exception:  # pragma: no cover - optional dependency
+    PIL_AVAILABLE = False
+
+path = sys.argv[1]
+label_text = sys.argv[2]
+max_w = int(sys.argv[3])
+max_h = int(sys.argv[4])
+
+temp_path = None
+
+
+def ensure_local(source: str) -> str:
+    global temp_path
+    if source.startswith("http://") or source.startswith("https://"):
+        data = urlopen(source, timeout=10).read()
+        if PIL_AVAILABLE:
+            return data  # type: ignore[return-value]
+        suffix = os.path.splitext(urlparse(source).path)[1] or ".img"
+        import tempfile
+
+        fd, temp_path = tempfile.mkstemp(suffix=suffix)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+        return temp_path
+    return source
+
+
+def load_image() -> "object":
+    source = ensure_local(path)
+    if PIL_AVAILABLE:
+        if isinstance(source, bytes):
+            img = Image.open(BytesIO(source))
+        else:
+            img = Image.open(source)
+        img.thumbnail((max_w, max_h))
+        return ImageTk.PhotoImage(img)
+    photo = tk.PhotoImage(file=source)
+    w = photo.width()
+    h = photo.height()
+    scale = 1
+    while w // scale > max_w or h // scale > max_h:
+        scale += 1
+    if scale > 1:
+        photo = photo.subsample(scale, scale)
+    return photo
+
+
+root = tk.Tk()
+root.title(label_text)
+
+try:
+    image = load_image()
+    if isinstance(image, tk.PhotoImage):
+        container = tk.Label(root, image=image)
+        container.image = image  # keep reference
+        container.pack()
+    else:
+        container = tk.Label(root, image=image)
+        container.image = image
+        container.pack()
+except Exception as exc:  # pragma: no cover - visual path
+    tk.Label(
+        root,
+        text=f"Unable to preview image: {exc}",
+        padx=12,
+        pady=12,
+    ).pack()
+
+tk.Label(root, text=label_text, pady=6).pack()
+
+def on_close() -> None:
+    root.destroy()
+
+
+root.protocol("WM_DELETE_WINDOW", on_close)
+root.mainloop()
+
+if temp_path and os.path.exists(temp_path):
+    try:
+        os.remove(temp_path)
+    except OSError:
+        pass
+`;
+
+function extractDetectedImages(
+  value: string,
+  sessionImages: Array<SessionImageReference>,
+): Array<DetectedImageMatch> {
+  const matches: Array<DetectedImageMatch> = [];
+  const occupied: Array<[number, number]> = [];
+
+  const overlaps = (start: number, end: number) =>
+    occupied.some(([s, e]) => !(end <= s || start >= e));
+  const mark = (start: number, end: number) => {
+    occupied.push([start, end]);
+  };
+
+  const pushMatch = (
+    key: string,
+    label: string,
+    originalText: string,
+    path: string | null,
+    start: number,
+  ) => {
+    matches.push({ key, label, originalText, path, start });
+    mark(start, start + originalText.length);
+  };
+
+  const findSessionImage = (token: string): SessionImageReference | null => {
+    const normalized = token.toLowerCase();
+    return (
+      sessionImages.find(
+        (entry) => entry.token.toLowerCase() === normalized,
+      ) ?? null
+    );
+  };
+
+  // Handle explicit clipboard tokens such as [img_01]
+  const placeholderRegex = /\[img_(\d+)\]/gi;
+  let placeholderMatch: RegExpExecArray | null;
+  while ((placeholderMatch = placeholderRegex.exec(value)) != null) {
+    const token = placeholderMatch[0] ?? "";
+    if (!token) {
+      continue;
+    }
+    const start = placeholderMatch.index ?? -1;
+    if (start < 0 || overlaps(start, start + token.length)) {
+      continue;
+    }
+    const found = findSessionImage(token);
+    const label = found?.path
+      ? found.path.split(/[/\\\\]/).pop() ?? token
+      : token;
+    pushMatch(
+      `clipboard-${start}-${token}`,
+      label,
+      token,
+      found?.path ?? null,
+      start,
+    );
+  }
+
+  const markdownImageRegex = /!\[[^\]]*?\]\(([^)]+)\)/gi;
+  let markdownMatch: RegExpExecArray | null;
+  while ((markdownMatch = markdownImageRegex.exec(value)) != null) {
+    const full = markdownMatch[0] ?? "";
+    const path = markdownMatch[1] ?? "";
+    const start = markdownMatch.index ?? -1;
+    if (!full || start < 0 || overlaps(start, start + full.length)) {
+      continue;
+    }
+    const label = path.split(/[/\\\\]/).pop() ?? path;
+    pushMatch(`markdown-${start}-${label}`, label, full, path, start);
+  }
+
+  const bracketImageRegex = /\[image[^\]]*?\](?:\(([^)]+)\))?/gi;
+  let bracketMatch: RegExpExecArray | null;
+  while ((bracketMatch = bracketImageRegex.exec(value)) != null) {
+    const full = bracketMatch[0] ?? "";
+    const start = bracketMatch.index ?? -1;
+    if (!full || start < 0 || overlaps(start, start + full.length)) {
+      continue;
+    }
+    const capturedPath = bracketMatch[1] ?? "";
+    const inside = full.slice(1, full.indexOf("]"));
+    const label = inside?.trim()?.length ? inside.trim() : capturedPath || full;
+    pushMatch(
+      `bracket-${start}-${label}`,
+      label,
+      full,
+      capturedPath || null,
+      start,
+    );
+  }
+
+  const quoteRegex = /['"]([^'"]+?\.${IMAGE_EXTENSION_PATTERN})['"]/gi;
+  let quoteMatch: RegExpExecArray | null;
+  while ((quoteMatch = quoteRegex.exec(value)) != null) {
+    const quoted = quoteMatch[0] ?? "";
+    const path = quoteMatch[1] ?? "";
+    const start = quoteMatch.index ?? -1;
+    if (!quoted || start < 0 || overlaps(start, start + quoted.length)) {
+      continue;
+    }
+    const label = path.split(/[/\\\\]/).pop() ?? path;
+    pushMatch(`quoted-${start}-${label}`, label, quoted, path, start);
+  }
+
+  const urlMatches = value.matchAll(IMAGE_URL_REGEX);
+  for (const match of urlMatches) {
+    const full = match[0] ?? "";
+    const start = match.index ?? -1;
+    if (!full || start < 0 || overlaps(start, start + full.length)) {
+      continue;
+    }
+    const label = full;
+    pushMatch(`url-${start}-${label}`, label, full, full, start);
+  }
+
+  const pathMatches = value.matchAll(IMAGE_PATH_REGEX);
+  for (const match of pathMatches) {
+    const full = match[0] ?? "";
+    const start = match.index ?? -1;
+    if (!full || start < 0 || overlaps(start, start + full.length)) {
+      continue;
+    }
+    const label = full.split(/[/\\\\]/).pop() ?? full;
+    pushMatch(`path-${start}-${label}`, label, full, full, start);
+  }
+
+  return matches.sort((a, b) => a.start - b.start);
+}
 
 export default function TerminalChatInput({
   isNew,
@@ -64,6 +301,9 @@ export default function TerminalChatInput({
   items = [],
   sessionImages,
   onPasteImageFromClipboard,
+  interruptModeEnabled,
+  onToggleInterruptMode,
+  onSubmitInterjection,
 }: {
   isNew: boolean;
   loading: boolean;
@@ -94,6 +334,12 @@ export default function TerminalChatInput({
     | { token: string; path: string }
     | null
     | Promise<{ token: string; path: string } | null>;
+  interruptModeEnabled: boolean;
+  onToggleInterruptMode: (enabled: boolean) => void;
+  onSubmitInterjection: (payload: {
+    text: string;
+    mode: "add" | "interrupt";
+  }) => void;
 }): React.ReactElement {
   // Slash command suggestion index
   const [selectedSlashSuggestion, setSelectedSlashSuggestion] =
@@ -109,6 +355,11 @@ export default function TerminalChatInput({
     Array<FileSystemSuggestion>
   >([]);
   const [selectedCompletion, setSelectedCompletion] = useState<number>(-1);
+  const [imageMatches, setImageMatches] = useState<Array<DetectedImageMatch>>([]);
+  const [selectedImageIndex, setSelectedImageIndex] = useState<number>(-1);
+  const [previewingIndex, setPreviewingIndex] = useState<number | null>(null);
+  const previewProcessRef = useRef<ChildProcess | null>(null);
+  const previewTimerRef = useRef<NodeJS.Timeout | null>(null);
   // Multiline text editor key to force remount after submission
   const [editorState, setEditorState] = useState<{
     key: number;
@@ -119,6 +370,98 @@ export default function TerminalChatInput({
   // Track the caret row across keystrokes
   const prevCursorRow = useRef<number | null>(null);
   const prevCursorWasAtLastRow = useRef<boolean>(false);
+
+  const stopPreview = useCallback(() => {
+    if (previewTimerRef.current) {
+      clearTimeout(previewTimerRef.current);
+      previewTimerRef.current = null;
+    }
+    if (previewProcessRef.current) {
+      try {
+        previewProcessRef.current.kill();
+      } catch {
+        // ignore – process may already be closed
+      }
+      previewProcessRef.current = null;
+    }
+    setPreviewingIndex(null);
+  }, []);
+
+  const launchPreview = useCallback(
+    (match: DetectedImageMatch): void => {
+      if (!match.path) {
+        return;
+      }
+
+      const columns = process.stdout?.columns ?? 80;
+      const rows = process.stdout?.rows ?? 24;
+      const approxWidth = Math.max(120, Math.floor((columns * 8) / 4));
+      const approxHeight = Math.max(120, Math.floor((rows * 16) / 4));
+
+      const sanitizedLabel = match.label.replace(/[\r\n]+/g, " ");
+      const args = [
+        "-c",
+        PREVIEW_SCRIPT,
+        match.path,
+        sanitizedLabel,
+        String(approxWidth),
+        String(approxHeight),
+      ];
+
+      const candidates = [
+        process.env["PYTHON"]?.trim(),
+        "python3",
+        "python",
+      ].filter((candidate): candidate is string => Boolean(candidate));
+
+      for (const candidate of candidates) {
+        try {
+          const child = spawn(candidate, args, {
+            stdio: ["ignore", "ignore", "ignore"],
+            windowsHide: true,
+          });
+          previewProcessRef.current = child;
+          child.once("exit", () => {
+            if (previewProcessRef.current === child) {
+              previewProcessRef.current = null;
+            }
+          });
+          return;
+        } catch (error) {
+          // Try the next interpreter if spawning failed.
+        }
+      }
+    },
+    [],
+  );
+
+  const schedulePreviewRelease = useCallback(() => {
+    if (previewTimerRef.current) {
+      clearTimeout(previewTimerRef.current);
+    }
+    previewTimerRef.current = setTimeout(() => {
+      stopPreview();
+    }, 200);
+  }, [stopPreview]);
+
+  useEffect(() => stopPreview, [stopPreview]);
+
+  useEffect(() => {
+    const extracted = extractDetectedImages(input, sessionImages);
+    setImageMatches(extracted);
+
+    if (extracted.length === 0) {
+      if (selectedImageIndex !== -1) {
+        setSelectedImageIndex(-1);
+      }
+      stopPreview();
+      return;
+    }
+
+    if (selectedImageIndex >= extracted.length) {
+      setSelectedImageIndex(extracted.length - 1);
+    }
+  }, [input, sessionImages, selectedImageIndex, stopPreview]);
 
   // --- Helper for updating input, remounting editor, and moving cursor to end ---
   const applyFsSuggestion = useCallback((newInputText: string) => {
@@ -267,6 +610,53 @@ export default function TerminalChatInput({
         return;
       }
 
+      if (
+        !confirmationPrompt &&
+        !loading &&
+        imageMatches.length > 0 &&
+        fsSuggestions.length === 0
+      ) {
+        const inputIsCommand = input.trim().startsWith("/");
+        if (!inputIsCommand && _key.tab) {
+          stopPreview();
+          const len = imageMatches.length;
+          if (len > 0) {
+            setSelectedImageIndex((prev) => {
+              if (prev < 0) {
+                return _key.shift ? len - 1 : 0;
+              }
+              const nextIndex = _key.shift
+                ? (prev - 1 + len) % len
+                : (prev + 1) % len;
+              return nextIndex;
+            });
+          }
+          return;
+        }
+
+        if (selectedImageIndex >= 0) {
+          const currentMatch = imageMatches[selectedImageIndex];
+          if (_key.rightArrow) {
+            if (currentMatch?.path) {
+              if (previewingIndex !== selectedImageIndex) {
+                stopPreview();
+              }
+              if (!previewProcessRef.current) {
+                launchPreview(currentMatch);
+              }
+              setPreviewingIndex(selectedImageIndex);
+              schedulePreviewRelease();
+            }
+            return;
+          }
+
+          if (!_key.tab && !_key.shift && !_key.ctrl && !_key.meta) {
+            stopPreview();
+            setSelectedImageIndex(-1);
+          }
+        }
+      }
+
       // Slash command navigation: up/down to select, enter to fill
       if (!confirmationPrompt && !loading && input.trim().startsWith("/")) {
         const prefix = input.trim();
@@ -348,6 +738,27 @@ export default function TerminalChatInput({
                 case "/clearhistory":
                   onSubmit(cmd);
                   break;
+                case "/interrupt": {
+                  const next = !interruptModeEnabled;
+                  onToggleInterruptMode(next);
+                  setItems((prev) => [
+                    ...prev,
+                    {
+                      id: `interrupt-mode-${Date.now()}`,
+                      type: "message",
+                      role: "system",
+                      content: [
+                        {
+                          type: "input_text",
+                          text: next
+                            ? "Interrupt mode enabled."
+                            : "Interrupt mode disabled.",
+                        },
+                      ],
+                    },
+                  ]);
+                  break;
+                }
                 default:
                   break;
               }
@@ -543,6 +954,35 @@ export default function TerminalChatInput({
       } else if (inputValue === "/compact") {
         setInput("");
         onCompact();
+        return;
+      } else if (inputValue.startsWith("/interrupt")) {
+        const [, requested] = inputValue.split(/\s+/);
+        let next = interruptModeEnabled;
+        if (requested?.toLowerCase() === "on") {
+          next = true;
+        } else if (requested?.toLowerCase() === "off") {
+          next = false;
+        } else {
+          next = !interruptModeEnabled;
+        }
+        setInput("");
+        onToggleInterruptMode(next);
+        setItems((prev) => [
+          ...prev,
+          {
+            id: `interrupt-mode-${Date.now()}`,
+            type: "message",
+            role: "system",
+            content: [
+              {
+                type: "input_text",
+                text: next
+                  ? "Interrupt mode enabled."
+                  : "Interrupt mode disabled.",
+              },
+            ],
+          },
+        ]);
         return;
       } else if (inputValue.startsWith("/model")) {
         setInput("");
@@ -800,6 +1240,8 @@ export default function TerminalChatInput({
       skipNextSubmit,
       items,
       sessionImages,
+      interruptModeEnabled,
+      onToggleInterruptMode,
     ],
   );
 
@@ -825,6 +1267,8 @@ export default function TerminalChatInput({
             onInterrupt={interruptAgent}
             active={active}
             thinkingSeconds={thinkingSeconds}
+            interruptModeEnabled={interruptModeEnabled}
+            onSubmitInterjection={onSubmitInterjection}
           />
         ) : (
           <Box paddingX={1}>
@@ -887,6 +1331,34 @@ export default function TerminalChatInput({
           ))}
         </Box>
       )}
+      {imageMatches.length > 0 && (
+        <Box paddingX={2} marginBottom={1}>
+          <Text>
+            {imageMatches.map((match, idx) => {
+              const isSelected = idx === selectedImageIndex;
+              const isPreview = previewingIndex === idx && isSelected;
+              const trimmedOriginal = match.originalText.trim();
+              const hasBrackets =
+                trimmedOriginal.startsWith("[") &&
+                trimmedOriginal.includes("]");
+              const defaultDisplay = hasBrackets
+                ? trimmedOriginal
+                : `[${match.label}]`;
+              const arrow = "›";
+              const displayText = isSelected
+                ? `${isPreview ? defaultDisplay : "[SHOW]"}${arrow}`
+                : defaultDisplay;
+              const color = isSelected ? "#ffa94d" : "blueBright";
+              return (
+                <Fragment key={match.key}>
+                  {idx > 0 ? "  " : ""}
+                  <Text color={color}>{displayText}</Text>
+                </Fragment>
+              );
+            })}
+          </Text>
+        </Box>
+      )}
       <Box paddingX={2} marginBottom={1}>
         {isNew && !input ? (
           <Text dimColor>
@@ -930,6 +1402,10 @@ export default function TerminalChatInput({
                 </Text>
               </>
             )}
+            {" | "}
+            <Text color={interruptModeEnabled ? "#ffa94d" : "gray"}>
+              interrupt mode: {interruptModeEnabled ? "ON" : "off"}
+            </Text>
           </Text>
         )}
       </Box>
@@ -941,13 +1417,31 @@ function TerminalChatInputThinking({
   onInterrupt,
   active,
   thinkingSeconds,
+  interruptModeEnabled,
+  onSubmitInterjection,
 }: {
   onInterrupt: () => void;
   active: boolean;
   thinkingSeconds: number;
+  interruptModeEnabled: boolean;
+  onSubmitInterjection: (payload: {
+    text: string;
+    mode: "add" | "interrupt";
+  }) => void;
 }) {
   const [awaitingConfirm, setAwaitingConfirm] = useState(false);
   const [dots, setDots] = useState("");
+  const [interjectionDraft, setInterjectionDraft] = useState<string>("");
+  const [interjectionMode, setInterjectionMode] = useState<"add" | "interrupt">(
+    "add",
+  );
+
+  useEffect(() => {
+    if (!interruptModeEnabled) {
+      setInterjectionDraft("");
+      setInterjectionMode("add");
+    }
+  }, [interruptModeEnabled]);
 
   // Animate ellipsis
   useInterval(() => {
@@ -987,6 +1481,63 @@ function TerminalChatInputThinking({
   // ---------------------------------------------------------------------
 
   const { stdin, setRawMode } = useStdin();
+
+  useInput(
+    (inputValue, key) => {
+      if (!interruptModeEnabled) {
+        return;
+      }
+
+      if (key.escape) {
+        return;
+      }
+
+      if (key.return) {
+        const trimmed = interjectionDraft.trim();
+        if (trimmed.length === 0) {
+          return;
+        }
+        let mode: "add" | "interrupt" = interjectionMode;
+        if (mode === "add") {
+          if (trimmed.startsWith("!") || trimmed.endsWith("!")) {
+            mode = "interrupt";
+          }
+        }
+        const normalized = trimmed.replace(/^!+/, "").replace(/!+$/, "").trim();
+        if (normalized.length === 0) {
+          setInterjectionDraft("");
+          setInterjectionMode("add");
+          return;
+        }
+        onSubmitInterjection({ text: normalized, mode });
+        setInterjectionDraft("");
+        setInterjectionMode("add");
+        return;
+      }
+
+      if (key.backspace) {
+        if (interjectionDraft.length > 0) {
+          setInterjectionDraft((prev) => prev.slice(0, -1));
+        }
+        return;
+      }
+
+      if (key.tab) {
+        return;
+      }
+
+      if (!key.ctrl && !key.meta && inputValue) {
+        if (inputValue === "!" && interjectionDraft.length === 0) {
+          setInterjectionMode((prev) =>
+            prev === "interrupt" ? "add" : "interrupt",
+          );
+          return;
+        }
+        setInterjectionDraft((prev) => prev + inputValue);
+      }
+    },
+    { isActive: active },
+  );
 
   React.useEffect(() => {
     if (!active) {
@@ -1070,6 +1621,14 @@ function TerminalChatInputThinking({
           <Text dimColor>to interrupt</Text>
         </Text>
       </Box>
+      {interruptModeEnabled && (
+        <Box flexDirection="row" gap={1} paddingX={1}>
+          <Text color={interjectionMode === "interrupt" ? "#ffa94d" : "yellow"}>
+            [{interjectionMode === "interrupt" ? "Interrupt" : "Add"}]
+          </Text>
+          <Text>{interjectionDraft || ""}</Text>
+        </Box>
+      )}
     </Box>
   );
 }

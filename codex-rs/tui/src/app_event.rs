@@ -3,6 +3,12 @@ use crossterm::event::KeyEvent;
 
 use crate::slash_command::SlashCommand;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum InterjectionMode {
+    Add,
+    Interrupt,
+}
+
 #[allow(clippy::large_enum_variant)]
 pub(crate) enum AppEvent {
     CodexEvent(Event),
@@ -28,4 +34,16 @@ pub(crate) enum AppEvent {
     /// Dispatch a recognized slash command from the UI (composer) to the app
     /// layer so it can be handled centrally.
     DispatchCommand(SlashCommand),
+
+    /// Request that the chat composer stop the active image preview. The
+    /// `token` helps deduplicate stale timer callbacks.
+    ComposerStopPreview {
+        token: u64,
+    },
+
+    /// Submit a user interjection while interrupt mode is active.
+    SubmitInterjection {
+        text: String,
+        mode: InterjectionMode,
+    },
 }

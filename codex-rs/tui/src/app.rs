@@ -247,9 +247,23 @@ impl<'a> App<'a> {
                             tracing::error!("Failed to toggle mouse mode: {e}");
                         }
                     }
+                    SlashCommand::ToggleInterruptMode => match &mut self.app_state {
+                        AppState::Chat { widget } => {
+                            widget.toggle_interrupt_mode();
+                        }
+                        AppState::Login { .. } | AppState::GitWarning { .. } => {}
+                    },
                     SlashCommand::Quit => {
                         break;
                     }
+                },
+                AppEvent::ComposerStopPreview { token } => match &mut self.app_state {
+                    AppState::Chat { widget } => widget.stop_image_preview(token),
+                    AppState::Login { .. } | AppState::GitWarning { .. } => {}
+                },
+                AppEvent::SubmitInterjection { text, mode } => match &mut self.app_state {
+                    AppState::Chat { widget } => widget.submit_interjection(text, mode),
+                    AppState::Login { .. } | AppState::GitWarning { .. } => {}
                 },
             }
         }

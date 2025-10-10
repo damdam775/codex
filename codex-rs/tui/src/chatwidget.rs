@@ -30,6 +30,7 @@ use tokio::sync::mpsc::UnboundedSender;
 use tokio::sync::mpsc::unbounded_channel;
 
 use crate::app_event::AppEvent;
+use crate::app_event::InterjectionMode;
 use crate::app_event_sender::AppEventSender;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
@@ -46,6 +47,9 @@ pub(crate) struct ChatWidget<'a> {
     input_focus: InputFocus,
     config: Config,
     initial_user_message: Option<UserMessage>,
+    interrupt_mode_enabled: bool,
+    pending_addendum: Option<String>,
+    pending_interruption: Option<String>,
 }
 
 #[derive(Clone, Copy, Eq, PartialEq)]
@@ -131,6 +135,9 @@ impl ChatWidget<'_> {
                 initial_prompt.unwrap_or_default(),
                 initial_images,
             ),
+            interrupt_mode_enabled: false,
+            pending_addendum: None,
+            pending_interruption: None,
         }
     }
 
@@ -140,6 +147,7 @@ impl ChatWidget<'_> {
         // to the bottom pane so it can handle auto-completion.
         if matches!(key_event.code, crossterm::event::KeyCode::Tab)
             && !self.bottom_pane.is_command_popup_visible()
+            && !self.bottom_pane.captures_tab()
         {
             self.input_focus = match self.input_focus {
                 InputFocus::HistoryPane => InputFocus::BottomPane,
@@ -248,11 +256,13 @@ impl ChatWidget<'_> {
                 last_agent_message: _,
             }) => {
                 self.bottom_pane.set_task_running(false);
+                self.on_task_idle();
                 self.request_redraw();
             }
             EventMsg::Error(ErrorEvent { message }) => {
                 self.conversation_history.add_error(message);
                 self.bottom_pane.set_task_running(false);
+                self.on_task_idle();
             }
             EventMsg::ExecApprovalRequest(ExecApprovalRequestEvent {
                 command,
@@ -370,6 +380,65 @@ impl ChatWidget<'_> {
     pub(crate) fn update_latest_log(&mut self, line: String) {
         // Forward only if we are currently showing the status indicator.
         self.bottom_pane.update_status_text(line);
+    }
+
+    pub(crate) fn stop_image_preview(&mut self, token: u64) {
+        self.bottom_pane.stop_image_preview(token);
+    }
+
+    pub(crate) fn submit_interjection(&mut self, text: String, mode: InterjectionMode) {
+        let trimmed = text.trim();
+        if trimmed.is_empty() {
+            return;
+        }
+
+        match mode {
+            InterjectionMode::Interrupt => {
+                self.pending_interruption = Some(trimmed.to_string());
+                self.bottom_pane.reset_interjection_prompt();
+                self.codex_op_tx
+                    .send(Op::Interrupt)
+                    .unwrap_or_else(|e| tracing::error!("failed to send interrupt op: {e}"));
+                self.conversation_history.add_background_event(format!(
+                    "Wait, it seems the user has something more to say: {trimmed}"
+                ));
+                self.conversation_history.scroll_to_bottom();
+            }
+            InterjectionMode::Add => {
+                self.pending_addendum = Some(trimmed.to_string());
+                self.bottom_pane.reset_interjection_prompt();
+            }
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn toggle_interrupt_mode(&mut self) {
+        self.interrupt_mode_enabled = !self.interrupt_mode_enabled;
+        self.bottom_pane
+            .set_interrupt_mode(self.interrupt_mode_enabled);
+        let status = if self.interrupt_mode_enabled {
+            "Interrupt mode enabled."
+        } else {
+            "Interrupt mode disabled."
+        };
+        self.conversation_history
+            .add_background_event(status.to_string());
+        self.conversation_history.scroll_to_bottom();
+        self.request_redraw();
+    }
+
+    fn on_task_idle(&mut self) {
+        if let Some(text) = self.pending_addendum.take() {
+            self.conversation_history.add_background_event(format!(
+                "Before going further, know that the user also want to add that: {text}"
+            ));
+            self.conversation_history.scroll_to_bottom();
+            self.submit_user_message(text.into());
+        }
+
+        if let Some(text) = self.pending_interruption.take() {
+            self.submit_user_message(text.into());
+        }
     }
 
     fn request_redraw(&mut self) {

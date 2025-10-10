@@ -46,4 +46,8 @@ pub(crate) trait BottomPaneView<'a> {
     ) -> Option<ApprovalRequest> {
         Some(request)
     }
+
+    fn set_interrupt_mode(&mut self, _enabled: bool) {}
+
+    fn reset_interjection_prompt(&mut self) {}
 }

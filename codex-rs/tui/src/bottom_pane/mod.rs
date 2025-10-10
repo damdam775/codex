@@ -36,6 +36,7 @@ pub(crate) struct BottomPane<'a> {
     app_event_tx: AppEventSender,
     has_input_focus: bool,
     is_task_running: bool,
+    interrupt_mode_enabled: bool,
 }
 
 pub(crate) struct BottomPaneParams {
@@ -51,6 +52,7 @@ impl BottomPane<'_> {
             app_event_tx: params.app_event_tx,
             has_input_focus: params.has_input_focus,
             is_task_running: false,
+            interrupt_mode_enabled: false,
         }
     }
 
@@ -65,6 +67,7 @@ impl BottomPane<'_> {
                 self.active_view = Some(Box::new(StatusIndicatorView::new(
                     self.app_event_tx.clone(),
                     height,
+                    self.interrupt_mode_enabled,
                 )));
             }
             self.request_redraw();
@@ -76,6 +79,10 @@ impl BottomPane<'_> {
             }
             input_result
         }
+    }
+
+    pub(crate) fn captures_tab(&self) -> bool {
+        self.active_view.is_none() && self.composer.captures_tab()
     }
 
     /// Update the status indicator text (only when the `StatusIndicatorView` is
@@ -109,11 +116,13 @@ impl BottomPane<'_> {
                 self.active_view = Some(Box::new(StatusIndicatorView::new(
                     self.app_event_tx.clone(),
                     height,
+                    self.interrupt_mode_enabled,
                 )));
                 self.request_redraw();
             }
             (false, true) => {
                 if let Some(mut view) = self.active_view.take() {
+                    view.reset_interjection_prompt();
                     if view.should_hide_when_task_is_done() {
                         // Leave self.active_view as None.
                         self.request_redraw();
@@ -165,6 +174,30 @@ impl BottomPane<'_> {
     /// Returns true when the slash-command popup inside the composer is visible.
     pub(crate) fn is_command_popup_visible(&self) -> bool {
         self.active_view.is_none() && self.composer.is_command_popup_visible()
+    }
+
+    pub(crate) fn set_interrupt_mode(&mut self, enabled: bool) {
+        self.interrupt_mode_enabled = enabled;
+        self.composer.set_interrupt_mode(enabled);
+        if let Some(view) = self.active_view.as_mut() {
+            view.set_interrupt_mode(enabled);
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn reset_interjection_prompt(&mut self) {
+        if let Some(view) = self.active_view.as_mut() {
+            view.reset_interjection_prompt();
+        }
+        self.request_redraw();
+    }
+
+    pub(crate) fn stop_image_preview(&mut self, token: u64) {
+        if self.active_view.is_none() {
+            if self.composer.stop_image_preview(token) {
+                self.request_redraw();
+            }
+        }
     }
 
     // --- History helpers ---
