@@ -19,6 +19,9 @@ if ($env:PATH -notlike "*$nodeDir*") {
     [Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$nodeDir", "User")
 }
 
+# Resolve repository root (one level above the scripts directory)
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot "..")).Path
+
 # Ensure ~/.codex exists
 $codexDir = Join-Path $env:USERPROFILE ".codex"
 if (!(Test-Path $codexDir)) {
@@ -115,19 +118,41 @@ if ($env:PATH -notlike "*$npmBin*") {
     [Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$npmBin", "User")
 }
 
-# Optional CLI installation
-$respCli = Read-Host "Install Codex CLI now? [Y/n]"
+# Optional Rust CLI build
+$respCli = Read-Host "Build the Codex CLI from source now? [Y/n]"
 if ($respCli -match '^[Yy]' -or $respCli -eq '') {
-    try {
-        npm install -g @openai/codex@native | Out-Null
-        $codexCmd = Get-Command codex -ErrorAction SilentlyContinue
-        if (-not $codexCmd) {
-            Write-Host "CLI installed but 'codex' not found in PATH. Restart your terminal or check npm prefix." -ForegroundColor Yellow
+    $cargo = Get-Command cargo -ErrorAction SilentlyContinue
+    if (-not $cargo) {
+        Write-Host "Rust toolchain not found. Install it from https://rustup.rs and re-run this step." -ForegroundColor Red
+    } else {
+        $cliCrate = Join-Path (Join-Path $repoRoot "codex-rs") "cli"
+        if (-not (Test-Path $cliCrate)) {
+            Write-Host "Could not locate Codex CLI crate at $cliCrate" -ForegroundColor Red
         } else {
-            Write-Host "Codex CLI installed" -ForegroundColor Green
+            $exitCode = 0
+            Push-Location $repoRoot
+            try {
+                Write-Host "Building Codex CLI (this may take a few minutes)..." -ForegroundColor Cyan
+                & $cargo.Source install --path $cliCrate --locked --force
+                $exitCode = $LASTEXITCODE
+            } catch {
+                $exitCode = 1
+                Write-Host "Failed to invoke cargo: $_" -ForegroundColor Red
+            } finally {
+                Pop-Location
+            }
+
+            if ($exitCode -eq 0) {
+                $cargoBin = Join-Path $env:USERPROFILE ".cargo\bin"
+                Write-Host "Codex CLI installed to $cargoBin" -ForegroundColor Green
+                if ($env:PATH -notlike "*$cargoBin*") {
+                    Write-Host "Adding ~/.cargo/bin to PATH" -ForegroundColor Yellow
+                    [Environment]::SetEnvironmentVariable("PATH", $env:PATH + ";$cargoBin", "User")
+                }
+            } else {
+                Write-Host "Cargo reported a non-zero exit code ($exitCode)." -ForegroundColor Red
+            }
         }
-    } catch {
-        Write-Host "Failed to install Codex CLI: $_" -ForegroundColor Red
     }
 }
 
