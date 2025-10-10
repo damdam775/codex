@@ -2,11 +2,14 @@ use crossterm::event::KeyCode;
 use crossterm::event::KeyEvent;
 use crossterm::event::KeyEventKind;
 use crossterm::event::KeyModifiers;
+use crossterm::terminal;
 use ratatui::buffer::Buffer;
 use ratatui::layout::Constraint;
 use ratatui::layout::Layout;
 use ratatui::layout::Margin;
 use ratatui::layout::Rect;
+use ratatui::style::Color;
+use ratatui::style::Modifier;
 use ratatui::style::Style;
 use ratatui::style::Stylize;
 use ratatui::text::Line;
@@ -48,14 +51,19 @@ use crate::bottom_pane::textarea::TextAreaState;
 use crate::clipboard_paste::normalize_pasted_path;
 use crate::clipboard_paste::pasted_image_format;
 use crate::history_cell;
-use crate::ui_consts::LIVE_PREFIX_COLS;
 use codex_file_search::FileMatch;
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::env;
 use std::path::Path;
 use std::path::PathBuf;
+use std::process::Child;
+use std::process::Command;
+use std::process::Stdio;
 use std::time::Duration;
 use std::time::Instant;
+use tracing::warn;
+use unicode_width::UnicodeWidthStr;
 
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
@@ -73,6 +81,7 @@ pub enum InputResult {
 struct AttachedImage {
     placeholder: String,
     path: PathBuf,
+    element_id: u64,
 }
 
 enum PromptSelectionMode {
@@ -83,6 +92,29 @@ enum PromptSelectionMode {
 enum PromptSelectionAction {
     Insert { text: String, cursor: Option<usize> },
     Submit { text: String },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ComposerInterruptIntent {
+    Add,
+    Interrupt,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct InterruptUiState {
+    enabled: bool,
+    intent: ComposerInterruptIntent,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct AttachmentSelection {
+    index: usize,
+    element_id: u64,
+}
+
+struct PreviewHandle {
+    child: Child,
+    element_id: u64,
 }
 
 pub(crate) struct ChatComposer {
@@ -99,6 +131,9 @@ pub(crate) struct ChatComposer {
     pending_pastes: Vec<(String, String)>,
     has_focus: bool,
     attached_images: Vec<AttachedImage>,
+    selected_attachment: Option<AttachmentSelection>,
+    preview: Option<PreviewHandle>,
+    preview_active: bool,
     placeholder_text: String,
     is_task_running: bool,
     // Non-bracketed paste burst tracker.
@@ -109,6 +144,7 @@ pub(crate) struct ChatComposer {
     footer_mode: FooterMode,
     footer_hint_override: Option<Vec<(String, String)>>,
     context_window_percent: Option<u8>,
+    interrupt_ui: InterruptUiState,
 }
 
 /// Popup state – at most one can be visible at any time.
@@ -144,6 +180,9 @@ impl ChatComposer {
             pending_pastes: Vec::new(),
             has_focus: has_input_focus,
             attached_images: Vec::new(),
+            selected_attachment: None,
+            preview: None,
+            preview_active: false,
             placeholder_text,
             is_task_running: false,
             paste_burst: PasteBurst::default(),
@@ -152,6 +191,10 @@ impl ChatComposer {
             footer_mode: FooterMode::ShortcutSummary,
             footer_hint_override: None,
             context_window_percent: None,
+            interrupt_ui: InterruptUiState {
+                enabled: false,
+                intent: ComposerInterruptIntent::Add,
+            },
         };
         // Apply configuration via the setter to keep side-effects centralized.
         this.set_disable_paste_burst(disable_paste_burst);
@@ -165,8 +208,8 @@ impl ChatComposer {
             .unwrap_or_else(|| footer_height(footer_props));
         let footer_spacing = Self::footer_spacing(footer_hint_height);
         let footer_total_height = footer_hint_height + footer_spacing;
-        self.textarea
-            .desired_height(width.saturating_sub(LIVE_PREFIX_COLS))
+        let prefix = self.live_prefix_width();
+        self.textarea.desired_height(width.saturating_sub(prefix))
             + 2
             + match &self.active_popup {
                 ActivePopup::None => footer_total_height,
@@ -197,8 +240,9 @@ impl ChatComposer {
         let [composer_rect, popup_rect] =
             Layout::vertical([Constraint::Min(1), popup_constraint]).areas(area);
         let mut textarea_rect = composer_rect;
-        textarea_rect.width = textarea_rect.width.saturating_sub(LIVE_PREFIX_COLS);
-        textarea_rect.x = textarea_rect.x.saturating_add(LIVE_PREFIX_COLS);
+        let prefix_width = self.live_prefix_width();
+        textarea_rect.width = textarea_rect.width.saturating_sub(prefix_width);
+        textarea_rect.x = textarea_rect.x.saturating_add(prefix_width);
         [composer_rect, textarea_rect, popup_rect]
     }
 
@@ -306,6 +350,7 @@ impl ChatComposer {
         // Clear any existing content, placeholders, and attachments first.
         self.textarea.set_text("");
         self.pending_pastes.clear();
+        self.clear_selected_attachment();
         self.attached_images.clear();
         self.textarea.set_text(&text);
         self.textarea.set_cursor(0);
@@ -323,14 +368,350 @@ impl ChatComposer {
         let placeholder = format!("[image {width}x{height} {format_label}]");
         // Insert as an element to match large paste placeholder behavior:
         // styled distinctly and treated atomically for cursor/mutations.
-        self.textarea.insert_element(&placeholder);
-        self.attached_images
-            .push(AttachedImage { placeholder, path });
+        let element_id = self.textarea.insert_element(&placeholder);
+        self.attached_images.push(AttachedImage {
+            placeholder,
+            path,
+            element_id,
+        });
+        self.reconcile_selected_attachment();
     }
 
     pub fn take_recent_submission_images(&mut self) -> Vec<PathBuf> {
+        self.clear_selected_attachment();
         let images = std::mem::take(&mut self.attached_images);
         images.into_iter().map(|img| img.path).collect()
+    }
+
+    fn selection_display_for(placeholder: &str) -> String {
+        let target_width = UnicodeWidthStr::width(placeholder);
+        let base = "[SHOW]";
+        let mut display = base.to_string();
+        let base_width = UnicodeWidthStr::width(base);
+        if target_width > base_width {
+            display.push_str(&" ".repeat(target_width - base_width));
+        }
+        display
+    }
+
+    fn selection_style() -> Style {
+        Style::default()
+            .fg(Color::Rgb(255, 178, 102))
+            .add_modifier(Modifier::BOLD)
+    }
+
+    fn apply_selection_visuals(&mut self, index: usize) -> bool {
+        let Some(image) = self.attached_images.get(index) else {
+            return false;
+        };
+        let element_id = image.element_id;
+        let display = Self::selection_display_for(&image.placeholder);
+        let style = Self::selection_style();
+        let _ = self.textarea.set_element_style(element_id, style);
+        let _ = self.textarea.set_element_display_override(
+            element_id,
+            Some(display),
+            Some("▸".to_string()),
+        );
+        self.selected_attachment = Some(AttachmentSelection { index, element_id });
+        true
+    }
+
+    fn clear_selected_attachment(&mut self) {
+        self.stop_preview(false);
+        if let Some(selection) = self.selected_attachment.take() {
+            if self.textarea.element_exists(selection.element_id) {
+                let _ = self
+                    .textarea
+                    .set_element_style(selection.element_id, Style::default().fg(Color::Cyan));
+                let _ =
+                    self.textarea
+                        .set_element_display_override(selection.element_id, None, None);
+            }
+        }
+    }
+
+    fn focus_next_attachment(&mut self) -> bool {
+        if self.attached_images.is_empty() {
+            return false;
+        }
+        self.reconcile_selected_attachment();
+        let next_index = match self.selected_attachment {
+            Some(selection) => (selection.index + 1) % self.attached_images.len(),
+            None => 0,
+        };
+        self.clear_selected_attachment();
+        self.apply_selection_visuals(next_index)
+    }
+
+    fn handle_attachment_tab(&mut self, key_event: &KeyEvent) -> bool {
+        if key_event.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+        if !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            return false;
+        }
+        if !matches!(key_event.code, KeyCode::Tab) {
+            return false;
+        }
+        self.focus_next_attachment()
+    }
+
+    fn handle_attachment_preview_key(&mut self, key_event: &KeyEvent) -> bool {
+        if self.selected_attachment.is_none() {
+            return false;
+        }
+        if key_event.modifiers != KeyModifiers::NONE {
+            return false;
+        }
+        if matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat) {
+            if key_event.code == KeyCode::Right {
+                return self.start_attachment_preview();
+            }
+        } else if key_event.kind == KeyEventKind::Release && key_event.code == KeyCode::Right {
+            self.stop_preview(true);
+            return true;
+        }
+        false
+    }
+
+    fn start_attachment_preview(&mut self) -> bool {
+        if self.preview_active {
+            return true;
+        }
+        let Some(selection) = self.selected_attachment else {
+            return false;
+        };
+        let Some(image) = self
+            .attached_images
+            .iter()
+            .find(|img| img.element_id == selection.element_id)
+        else {
+            return false;
+        };
+        match self.spawn_preview_process(&image.path) {
+            Ok(child) => {
+                let _ = self.textarea.set_element_display_override(
+                    selection.element_id,
+                    Some(image.placeholder.clone()),
+                    Some("»".to_string()),
+                );
+                self.preview = Some(PreviewHandle {
+                    child,
+                    element_id: selection.element_id,
+                });
+                self.preview_active = true;
+                true
+            }
+            Err(err) => {
+                self.stop_preview(true);
+                warn!("failed to launch preview: {err}");
+                self.app_event_tx.send(AppEvent::InsertHistoryCell(Box::new(
+                    history_cell::new_error_event(format!("Unable to preview image: {err}")),
+                )));
+                false
+            }
+        }
+    }
+
+    fn stop_preview(&mut self, revert_to_show: bool) {
+        let element_id = self.preview.as_ref().map(|handle| handle.element_id);
+        if let Some(mut handle) = self.preview.take() {
+            let _ = handle.child.kill();
+            let _ = handle.child.wait();
+        }
+        if revert_to_show {
+            if let Some(element_id) = element_id {
+                if self.textarea.element_exists(element_id) {
+                    if let Some(image) = self
+                        .attached_images
+                        .iter()
+                        .find(|img| img.element_id == element_id)
+                    {
+                        let display = Self::selection_display_for(&image.placeholder);
+                        let _ = self.textarea.set_element_display_override(
+                            element_id,
+                            Some(display),
+                            Some("▸".to_string()),
+                        );
+                    }
+                }
+            }
+        }
+        self.preview_active = false;
+    }
+
+    fn spawn_preview_process(&self, path: &Path) -> Result<Child, String> {
+        let (cols, rows) = terminal::size().unwrap_or((120, 32));
+        let script = r#"
+import sys
+from pathlib import Path
+import tkinter as tk
+
+try:
+    from PIL import Image, ImageTk
+    PIL_AVAILABLE = True
+except Exception:
+    PIL_AVAILABLE = False
+
+def main():
+    path = Path(sys.argv[1])
+    cols = int(sys.argv[2])
+    rows = int(sys.argv[3])
+    root = tk.Tk()
+    root.title(path.name)
+    root.attributes('-topmost', True)
+    root.resizable(False, False)
+
+    cell_w = 8
+    cell_h = 16
+    max_w = max(1, int(cols * cell_w / 4))
+    max_h = max(1, int(rows * cell_h / 4))
+
+    try:
+        if PIL_AVAILABLE:
+            img = Image.open(path)
+            scale = min(max_w / img.width, max_h / img.height, 1.0)
+            new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
+            if new_size != img.size:
+                img = img.resize(new_size, Image.LANCZOS)
+            photo = ImageTk.PhotoImage(img)
+        else:
+            photo = tk.PhotoImage(file=str(path))
+            width = photo.width()
+            height = photo.height()
+            scale = min(max_w / width, max_h / height, 1.0)
+            if scale < 1.0:
+                step = max(1, int(round(1 / scale)))
+                photo = photo.subsample(step, step)
+    except Exception as exc:
+        label = tk.Label(root, text=f"Unable to preview image: {exc}", padx=12, pady=12)
+        label.pack()
+    else:
+        label = tk.Label(root, image=photo, borderwidth=0, highlightthickness=0)
+        label.image = photo
+        label.pack()
+
+    root.mainloop()
+
+if __name__ == '__main__':
+    main()
+"#;
+
+        let mut last_error: Option<String> = None;
+        for candidate in Self::python_candidates() {
+            let mut command = Command::new(&candidate);
+            let result = command
+                .arg("-c")
+                .arg(script)
+                .arg(path.to_string_lossy().to_string())
+                .arg(cols.to_string())
+                .arg(rows.to_string())
+                .stdin(Stdio::null())
+                .stdout(Stdio::null())
+                .stderr(Stdio::null())
+                .spawn();
+            match result {
+                Ok(child) => return Ok(child),
+                Err(err) => {
+                    let message = format!("{candidate}: {err}");
+                    warn!("preview candidate {candidate} failed: {err}");
+                    last_error = Some(message);
+                    continue;
+                }
+            }
+        }
+        Err(last_error.unwrap_or_else(|| "python interpreter not found".to_string()))
+    }
+
+    fn python_candidates() -> Vec<String> {
+        let mut out = Vec::new();
+        if let Ok(value) = env::var("PYTHON") {
+            if !value.trim().is_empty() {
+                out.push(value);
+            }
+        }
+        out.push("python3".to_string());
+        out.push("python".to_string());
+        out
+    }
+
+    fn reconcile_selected_attachment(&mut self) {
+        if let Some(selection) = self.selected_attachment {
+            if let Some(idx) = self
+                .attached_images
+                .iter()
+                .position(|img| img.element_id == selection.element_id)
+            {
+                if idx != selection.index {
+                    self.selected_attachment = Some(AttachmentSelection {
+                        index: idx,
+                        element_id: selection.element_id,
+                    });
+                }
+            } else {
+                self.clear_selected_attachment();
+            }
+        }
+    }
+
+    pub fn set_interrupt_mode(&mut self, enabled: bool) {
+        if self.interrupt_ui.enabled == enabled {
+            return;
+        }
+        self.interrupt_ui.enabled = enabled;
+        self.interrupt_ui.intent = ComposerInterruptIntent::Add;
+    }
+
+    pub fn set_interrupt_intent(&mut self, intent: ComposerInterruptIntent) {
+        if !self.interrupt_ui.enabled {
+            return;
+        }
+        self.interrupt_ui.intent = intent;
+    }
+
+    pub fn interrupt_intent(&self) -> Option<ComposerInterruptIntent> {
+        if self.interrupt_ui.enabled {
+            Some(self.interrupt_ui.intent)
+        } else {
+            None
+        }
+    }
+
+    fn toggle_interrupt_intent(&mut self) -> bool {
+        if !self.interrupt_ui.enabled {
+            return false;
+        }
+        self.interrupt_ui.intent = match self.interrupt_ui.intent {
+            ComposerInterruptIntent::Add => ComposerInterruptIntent::Interrupt,
+            ComposerInterruptIntent::Interrupt => ComposerInterruptIntent::Add,
+        };
+        true
+    }
+
+    fn live_prefix_width(&self) -> u16 {
+        const ARROW_WIDTH: u16 = 2;
+        if !self.interrupt_ui.enabled {
+            return ARROW_WIDTH;
+        }
+        let label = match self.interrupt_ui.intent {
+            ComposerInterruptIntent::Add => "[Add]",
+            ComposerInterruptIntent::Interrupt => "[interrupt]",
+        };
+        let label_width = UnicodeWidthStr::width(label) as u16 + 1; // trailing space
+        label_width + ARROW_WIDTH
+    }
+
+    fn interrupt_label_style(&self) -> Option<(String, Style)> {
+        if !self.interrupt_ui.enabled {
+            return None;
+        }
+        let (label, color) = match self.interrupt_ui.intent {
+            ComposerInterruptIntent::Add => ("[Add] ", Color::Yellow),
+            ComposerInterruptIntent::Interrupt => ("[interrupt] ", Color::Rgb(255, 140, 0)),
+        };
+        let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
+        Some((label.to_string(), style))
     }
 
     pub(crate) fn flush_paste_burst_if_due(&mut self) -> bool {
@@ -853,6 +1234,12 @@ impl ChatComposer {
         } else {
             self.footer_mode = reset_mode_after_activity(self.footer_mode);
         }
+        if self.handle_attachment_tab(&key_event) {
+            return (InputResult::None, true);
+        }
+        if self.handle_attachment_preview_key(&key_event) {
+            return (InputResult::None, true);
+        }
         match key_event {
             KeyEvent {
                 code: KeyCode::Char('d'),
@@ -1029,6 +1416,31 @@ impl ChatComposer {
         let now = Instant::now();
         self.handle_paste_burst_flush(now);
 
+        if matches!(input.kind, KeyEventKind::Press | KeyEventKind::Repeat)
+            && !matches!(input.code, KeyCode::Tab | KeyCode::Right)
+        {
+            if self.selected_attachment.is_some() {
+                self.clear_selected_attachment();
+            }
+        }
+
+        if let KeyEvent {
+            code: KeyCode::Char('!'),
+            modifiers,
+            kind,
+            ..
+        } = input
+        {
+            if self.interrupt_ui.enabled
+                && self.is_task_running
+                && modifiers.is_empty()
+                && matches!(kind, KeyEventKind::Press)
+                && self.toggle_interrupt_intent()
+            {
+                return (InputResult::None, true);
+            }
+        }
+
         if !matches!(input.code, KeyCode::Esc) {
             self.footer_mode = reset_mode_after_activity(self.footer_mode);
         }
@@ -1159,6 +1571,7 @@ impl ChatComposer {
                 }
             }
             self.attached_images = kept;
+            self.reconcile_selected_attachment();
         }
 
         (InputResult::None, true)
@@ -1465,6 +1878,9 @@ impl ChatComposer {
 
     pub fn set_task_running(&mut self, running: bool) {
         self.is_task_running = running;
+        if running && self.interrupt_ui.enabled {
+            self.interrupt_ui.intent = ComposerInterruptIntent::Add;
+        }
     }
 
     pub(crate) fn set_context_window_percent(&mut self, percent: Option<u8>) {
@@ -1537,12 +1953,12 @@ impl WidgetRef for ChatComposer {
         block_rect.y = composer_rect.y.saturating_sub(1);
         block_rect.height = composer_rect.height.saturating_add(1);
         Block::default().style(style).render_ref(block_rect, buf);
-        buf.set_span(
-            composer_rect.x,
-            composer_rect.y,
-            &"›".bold(),
-            composer_rect.width,
-        );
+        let mut prefix_x = composer_rect.x;
+        if let Some((label, label_style)) = self.interrupt_label_style() {
+            buf.set_string(prefix_x, composer_rect.y, &label, label_style);
+            prefix_x = prefix_x.saturating_add(UnicodeWidthStr::width(label.as_str()) as u16);
+        }
+        buf.set_span(prefix_x, composer_rect.y, &"›".bold(), composer_rect.width);
 
         let mut state = self.textarea_state.borrow_mut();
         StatefulWidgetRef::render_ref(&(&self.textarea), textarea_rect, buf, &mut state);
@@ -2712,13 +3128,13 @@ mod tests {
         let new_text = composer.textarea.text().to_string();
         assert_eq!(1, new_text.matches(&ph).count(), "one placeholder remains");
         assert_eq!(
-            vec![AttachedImage {
-                path: path2,
-                placeholder: "[image 10x5 PNG]".to_string()
-            }],
-            composer.attached_images,
+            composer.attached_images.len(),
+            1,
             "one image mapping remains"
         );
+        let remaining = &composer.attached_images[0];
+        assert_eq!(remaining.path, path2);
+        assert_eq!(remaining.placeholder, "[image 10x5 PNG]");
     }
 
     #[test]

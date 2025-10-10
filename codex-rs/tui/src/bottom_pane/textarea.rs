@@ -16,7 +16,15 @@ use unicode_width::UnicodeWidthStr;
 
 #[derive(Debug, Clone)]
 struct TextElement {
+    id: u64,
     range: Range<usize>,
+    style: Style,
+    display_override: Option<String>,
+    suffix: Option<String>,
+}
+
+fn default_element_style() -> Style {
+    Style::default().fg(Color::Cyan)
 }
 
 #[derive(Debug)]
@@ -26,6 +34,7 @@ pub(crate) struct TextArea {
     wrap_cache: RefCell<Option<WrapCache>>,
     preferred_col: Option<usize>,
     elements: Vec<TextElement>,
+    next_element_id: u64,
 }
 
 #[derive(Debug, Clone)]
@@ -48,6 +57,7 @@ impl TextArea {
             wrap_cache: RefCell::new(None),
             preferred_col: None,
             elements: Vec::new(),
+            next_element_id: 1,
         }
     }
 
@@ -57,6 +67,7 @@ impl TextArea {
         self.wrap_cache.replace(None);
         self.preferred_col = None;
         self.elements.clear();
+        self.next_element_id = 1;
     }
 
     pub fn text(&self) -> &str {
@@ -639,19 +650,64 @@ impl TextArea {
 
     // ===== Text elements support =====
 
-    pub fn insert_element(&mut self, text: &str) {
+    pub fn insert_element(&mut self, text: &str) -> u64 {
         let start = self.clamp_pos_for_insertion(self.cursor_pos);
         self.insert_str_at(start, text);
         let end = start + text.len();
-        self.add_element(start..end);
+        let id = self.next_element_id;
+        self.next_element_id = self.next_element_id.saturating_add(1);
+        self.add_element(TextElement {
+            id,
+            range: start..end,
+            style: default_element_style(),
+            display_override: None,
+            suffix: None,
+        });
         // Place cursor at end of inserted element
         self.set_cursor(end);
+        id
     }
 
-    fn add_element(&mut self, range: Range<usize>) {
-        let elem = TextElement { range };
-        self.elements.push(elem);
+    fn add_element(&mut self, element: TextElement) {
+        self.elements.push(element);
         self.elements.sort_by_key(|e| e.range.start);
+    }
+
+    fn find_element_index_by_id(&self, id: u64) -> Option<usize> {
+        self.elements.iter().position(|e| e.id == id)
+    }
+
+    pub fn element_exists(&self, id: u64) -> bool {
+        self.find_element_index_by_id(id).is_some()
+    }
+
+    pub fn set_element_style(&mut self, id: u64, style: Style) -> bool {
+        if let Some(idx) = self.find_element_index_by_id(id) {
+            self.elements[idx].style = style;
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn set_element_display_override(
+        &mut self,
+        id: u64,
+        display: Option<String>,
+        suffix: Option<String>,
+    ) -> bool {
+        if let Some(idx) = self.find_element_index_by_id(id) {
+            if let Some(ref text) = display {
+                if text.len() != self.elements[idx].range.len() {
+                    return false;
+                }
+            }
+            self.elements[idx].display_override = display;
+            self.elements[idx].suffix = suffix;
+            true
+        } else {
+            false
+        }
     }
 
     fn find_element_containing(&self, pos: usize) -> Option<usize> {
@@ -931,22 +987,43 @@ impl TextArea {
         for (row, idx) in range.enumerate() {
             let r = &lines[idx];
             let y = area.y + row as u16;
-            let line_range = r.start..r.end - 1;
-            // Draw base line with default style.
-            buf.set_string(area.x, y, &self.text[line_range.clone()], Style::default());
+            let line_range = r.start..r.end.saturating_sub(1);
+            let base_slice = &self.text[line_range.clone()];
+            buf.set_string(area.x, y, base_slice, Style::default());
 
-            // Overlay styled segments for elements that intersect this line.
             for elem in &self.elements {
-                // Compute overlap with displayed slice.
                 let overlap_start = elem.range.start.max(line_range.start);
                 let overlap_end = elem.range.end.min(line_range.end);
                 if overlap_start >= overlap_end {
                     continue;
                 }
-                let styled = &self.text[overlap_start..overlap_end];
+
+                let original_slice = &self.text[overlap_start..overlap_end];
                 let x_off = self.text[line_range.start..overlap_start].width() as u16;
-                let style = Style::default().fg(Color::Cyan);
-                buf.set_string(area.x + x_off, y, styled, style);
+                if let Some(display) = &elem.display_override {
+                    let width = original_slice.width();
+                    if width > 0 {
+                        let blanks = " ".repeat(width);
+                        buf.set_string(area.x + x_off, y, &blanks, Style::default());
+                    }
+                    let rel_start = overlap_start.saturating_sub(elem.range.start);
+                    let rel_end = overlap_end.saturating_sub(elem.range.start);
+                    if let Some(slice) = display.get(rel_start..rel_end) {
+                        if !slice.is_empty() {
+                            buf.set_string(area.x + x_off, y, slice, elem.style);
+                        }
+                    }
+                } else {
+                    buf.set_string(area.x + x_off, y, original_slice, elem.style);
+                }
+
+                if let Some(suffix) = &elem.suffix {
+                    if elem.range.end <= line_range.end {
+                        let prefix = &self.text[line_range.start..elem.range.end];
+                        let suffix_x = prefix.width() as u16;
+                        buf.set_string(area.x + suffix_x, y, suffix, elem.style);
+                    }
+                }
             }
         }
     }
