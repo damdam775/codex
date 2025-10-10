@@ -109,6 +109,7 @@ async fn summarize_context_three_requests_and_instructions() {
             items: vec![InputItem::Text {
                 text: "hello world".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -124,6 +125,7 @@ async fn summarize_context_three_requests_and_instructions() {
             items: vec![InputItem::Text {
                 text: THIRD_USER_MSG.into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -325,6 +327,7 @@ async fn auto_compact_runs_after_token_limit_hit() {
             items: vec![InputItem::Text {
                 text: FIRST_AUTO_MSG.into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -336,6 +339,7 @@ async fn auto_compact_runs_after_token_limit_hit() {
             items: vec![InputItem::Text {
                 text: SECOND_AUTO_MSG.into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -469,6 +473,7 @@ async fn auto_compact_persists_rollout_entries() {
             items: vec![InputItem::Text {
                 text: FIRST_AUTO_MSG.into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -479,6 +484,7 @@ async fn auto_compact_persists_rollout_entries() {
             items: vec![InputItem::Text {
                 text: SECOND_AUTO_MSG.into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -581,6 +587,7 @@ async fn auto_compact_stops_after_failed_attempt() {
             items: vec![InputItem::Text {
                 text: FIRST_AUTO_MSG.into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -675,6 +682,7 @@ async fn manual_compact_retries_after_context_window_error() {
             items: vec![InputItem::Text {
                 text: "first turn".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -803,6 +811,7 @@ async fn auto_compact_allows_multiple_attempts_when_interleaved_with_other_turn_
             items: vec![InputItem::Text {
                 text: MULTI_AUTO_MSG.into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();

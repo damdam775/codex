@@ -79,6 +79,7 @@ use crate::protocol::ExecApprovalRequestEvent;
 use crate::protocol::ExecCommandBeginEvent;
 use crate::protocol::ExecCommandEndEvent;
 use crate::protocol::InputItem;
+use crate::protocol::InterventionMode;
 use crate::protocol::ListCustomPromptsResponseEvent;
 use crate::protocol::Op;
 use crate::protocol::PatchApplyBeginEvent;
@@ -98,6 +99,7 @@ use crate::rollout::RolloutRecorder;
 use crate::rollout::RolloutRecorderParams;
 use crate::shell;
 use crate::state::ActiveTurn;
+use crate::state::PendingUserInput;
 use crate::state::SessionServices;
 use crate::tasks::CompactTask;
 use crate::tasks::RegularTask;
@@ -1007,19 +1009,30 @@ impl Session {
     }
 
     /// Returns the input if there was no task running to inject into
-    pub async fn inject_input(&self, input: Vec<InputItem>) -> Result<(), Vec<InputItem>> {
+    pub async fn inject_input(
+        &self,
+        input: Vec<InputItem>,
+        intervention: Option<InterventionMode>,
+    ) -> Result<(), Vec<InputItem>> {
         let mut active = self.active_turn.lock().await;
-        match active.as_mut() {
-            Some(at) => {
-                let mut ts = at.turn_state.lock().await;
-                ts.push_pending_input(input.into());
-                Ok(())
+        if let Some(at) = active.as_mut() {
+            let mut ts = at.turn_state.lock().await;
+            ts.push_pending_input(PendingUserInput {
+                items: input,
+                intervention,
+            });
+            Ok(())
+        } else {
+            if intervention.is_some() {
+                tracing::warn!(
+                    "received intervention input with no active task; falling back to new turn"
+                );
             }
-            None => Err(input),
+            Err(input)
         }
     }
 
-    pub async fn get_pending_input(&self) -> Vec<ResponseInputItem> {
+    pub async fn get_pending_input(&self) -> Vec<PendingUserInput> {
         let mut active = self.active_turn.lock().await;
         match active.as_mut() {
             Some(at) => {
@@ -1231,13 +1244,16 @@ async fn submission_loop(
                     .await;
                 }
             }
-            Op::UserInput { items } => {
+            Op::UserInput {
+                items,
+                intervention,
+            } => {
                 turn_context
                     .client
                     .get_otel_event_manager()
                     .user_prompt(&items);
                 // attempt to inject input into current task
-                if let Err(items) = sess.inject_input(items).await {
+                if let Err(items) = sess.inject_input(items, intervention).await {
                     // no current task, spawn a new one
                     sess.spawn_task(Arc::clone(&turn_context), sub.id, items, RegularTask)
                         .await;
@@ -1258,7 +1274,7 @@ async fn submission_loop(
                     .get_otel_event_manager()
                     .user_prompt(&items);
                 // attempt to inject input into current task
-                if let Err(items) = sess.inject_input(items).await {
+                if let Err(items) = sess.inject_input(items, None).await {
                     // Derive a fresh TurnContext for this turn using the provided overrides.
                     let provider = turn_context.client.get_provider();
                     let auth_manager = turn_context.client.get_auth_manager();
@@ -1441,9 +1457,12 @@ async fn submission_loop(
             Op::Compact => {
                 // Attempt to inject input into current task
                 if let Err(items) = sess
-                    .inject_input(vec![InputItem::Text {
-                        text: compact::SUMMARIZATION_PROMPT.to_string(),
-                    }])
+                    .inject_input(
+                        vec![InputItem::Text {
+                            text: compact::SUMMARIZATION_PROMPT.to_string(),
+                        }],
+                        None,
+                    )
                     .await
                 {
                     sess.spawn_task(Arc::clone(&turn_context), sub.id, items, CompactTask)
@@ -1671,11 +1690,20 @@ pub(crate) async fn run_task(
         // Note that pending_input would be something like a message the user
         // submitted through the UI while the model was running. Though the UI
         // may support this, the model might not.
-        let pending_input = sess
+        let mut pending_interventions: Vec<(InterventionMode, ResponseInputItem)> = Vec::new();
+        let pending_input_items = sess
             .get_pending_input()
             .await
             .into_iter()
-            .map(ResponseItem::from)
+            .filter_map(|pending| {
+                let message = ResponseInputItem::from(pending.items);
+                if let Some(mode) = pending.intervention {
+                    pending_interventions.push((mode, message));
+                    None
+                } else {
+                    Some(ResponseItem::from(message))
+                }
+            })
             .collect::<Vec<ResponseItem>>();
 
         // Construct the input that we will send to the model.
@@ -1689,13 +1717,14 @@ pub(crate) async fn run_task(
         //   only record the new items that originated in this turn so that it
         //   represents an append-only log without duplicates.
         let turn_input: Vec<ResponseItem> = if is_review_mode {
-            if !pending_input.is_empty() {
-                review_thread_history.extend(pending_input);
+            if !pending_input_items.is_empty() {
+                review_thread_history.extend(pending_input_items.clone());
             }
             review_thread_history.clone()
         } else {
-            sess.record_conversation_items(&pending_input).await;
-            sess.turn_input_with_history(pending_input).await
+            sess.record_conversation_items(&pending_input_items).await;
+            sess.turn_input_with_history(pending_input_items.clone())
+                .await
         };
 
         let turn_input_messages: Vec<String> = turn_input
@@ -1863,6 +1892,40 @@ pub(crate) async fn run_task(
 
                 auto_compact_recently_attempted = false;
 
+                let mut intervention_history_items: Vec<ResponseItem> = Vec::new();
+                let mut intervention_responses: Vec<ResponseInputItem> = Vec::new();
+                let mut saw_interrupt_intervention = false;
+                for (mode, pending) in pending_interventions.drain(..) {
+                    if let Some(formatted) = build_intervention_message(pending, mode) {
+                        intervention_history_items.push(ResponseItem::from(formatted.clone()));
+                        match mode {
+                            InterventionMode::Add => {
+                                intervention_responses.push(formatted);
+                            }
+                            InterventionMode::Interrupt => {
+                                saw_interrupt_intervention = true;
+                                intervention_responses.push(formatted);
+                            }
+                        }
+                    }
+                }
+
+                if saw_interrupt_intervention {
+                    responses = intervention_responses;
+                } else if !intervention_responses.is_empty() {
+                    responses.extend(intervention_responses);
+                }
+
+                if !intervention_history_items.is_empty() {
+                    if saw_interrupt_intervention {
+                        let mut combined = intervention_history_items;
+                        combined.extend(items_to_record_in_conversation_history);
+                        items_to_record_in_conversation_history = combined;
+                    } else {
+                        items_to_record_in_conversation_history.extend(intervention_history_items);
+                    }
+                }
+
                 if responses.is_empty() {
                     last_agent_message = get_last_assistant_message_from_turn(
                         &items_to_record_in_conversation_history,
@@ -1933,6 +1996,56 @@ fn parse_review_output_event(text: &str) -> ReviewOutputEvent {
     ReviewOutputEvent {
         overall_explanation: text.to_string(),
         ..Default::default()
+    }
+}
+
+fn build_intervention_message(
+    pending: ResponseInputItem,
+    mode: InterventionMode,
+) -> Option<ResponseInputItem> {
+    if let ResponseInputItem::Message { role, content } = pending {
+        let mut text_segments = Vec::new();
+        let mut attachments = Vec::new();
+        for item in content {
+            match item {
+                ContentItem::InputText { text } => text_segments.push(text),
+                other => attachments.push(other),
+            }
+        }
+        let combined_text = text_segments.join("\n");
+        let trimmed_text = combined_text.trim();
+        let decorated = match mode {
+            InterventionMode::Add => {
+                if trimmed_text.is_empty() {
+                    "But wait, the user wants you to know also. Please take that into account before continuing.".to_string()
+                } else {
+                    format!(
+                        "But wait, the user wants you to know also:\n{trimmed}\nPlease take that into account before continuing.",
+                        trimmed = trimmed_text
+                    )
+                }
+            }
+            InterventionMode::Interrupt => {
+                if trimmed_text.is_empty() {
+                    "Before you had the chance to receive the output of this command, the user interrupted with an additional note. Consider that first before continuing.".to_string()
+                } else {
+                    format!(
+                        "Before you had the chance to receive the output of this command, the user interrupted to add:\n{trimmed}\nConsider that first before continuing.",
+                        trimmed = trimmed_text
+                    )
+                }
+            }
+        };
+
+        let mut new_content = Vec::with_capacity(1 + attachments.len());
+        new_content.push(ContentItem::InputText { text: decorated });
+        new_content.extend(attachments);
+        Some(ResponseInputItem::Message {
+            role,
+            content: new_content,
+        })
+    } else {
+        None
     }
 }
 

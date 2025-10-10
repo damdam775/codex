@@ -97,6 +97,7 @@ async fn retries_on_early_close() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();

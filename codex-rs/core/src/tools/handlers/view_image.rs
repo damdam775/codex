@@ -67,7 +67,7 @@ impl ToolHandler for ViewImageHandler {
         let event_path = abs_path.clone();
 
         session
-            .inject_input(vec![InputItem::LocalImage { path: abs_path }])
+            .inject_input(vec![InputItem::LocalImage { path: abs_path }], None)
             .await
             .map_err(|_| {
                 FunctionCallError::RespondToModel(

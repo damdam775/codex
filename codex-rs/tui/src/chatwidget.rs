@@ -24,6 +24,7 @@ use codex_core::protocol::ExecCommandEndEvent;
 use codex_core::protocol::ExitedReviewModeEvent;
 use codex_core::protocol::InputItem;
 use codex_core::protocol::InputMessageKind;
+use codex_core::protocol::InterventionMode;
 use codex_core::protocol::ListCustomPromptsResponseEvent;
 use codex_core::protocol::McpListToolsResponseEvent;
 use codex_core::protocol::McpToolCallBeginEvent;
@@ -393,6 +394,7 @@ impl ChatWidget {
     fn on_task_started(&mut self) {
         self.bottom_pane.clear_ctrl_c_quit_hint();
         self.bottom_pane.set_task_running(true);
+        self.apply_interrupt_mode_to_composer();
         self.full_reasoning_buffer.clear();
         self.reasoning_buffer.clear();
         self.request_redraw();
@@ -403,6 +405,7 @@ impl ChatWidget {
         self.flush_answer_stream_with_separator();
         // Mark task stopped and request redraw now that all content is in history.
         self.bottom_pane.set_task_running(false);
+        self.apply_interrupt_mode_to_composer();
         self.running_commands.clear();
         self.request_redraw();
 
@@ -906,7 +909,7 @@ impl ChatWidget {
         let placeholder = EXAMPLE_PROMPTS[rng.random_range(0..EXAMPLE_PROMPTS.len())].to_string();
         let codex_op_tx = spawn_agent(config.clone(), app_event_tx.clone(), conversation_manager);
 
-        Self {
+        let mut chat = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_tx,
@@ -945,8 +948,10 @@ impl ChatWidget {
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
-            interrupt_mode_enabled: false,
-        }
+            interrupt_mode_enabled: true,
+        };
+        chat.apply_interrupt_mode_to_composer();
+        chat
     }
 
     /// Create a ChatWidget attached to an existing conversation (e.g., a fork).
@@ -970,7 +975,7 @@ impl ChatWidget {
         let codex_op_tx =
             spawn_agent_from_existing(conversation, session_configured, app_event_tx.clone());
 
-        Self {
+        let mut chat = Self {
             app_event_tx: app_event_tx.clone(),
             frame_requester: frame_requester.clone(),
             codex_op_tx,
@@ -1009,8 +1014,10 @@ impl ChatWidget {
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
-            interrupt_mode_enabled: false,
-        }
+            interrupt_mode_enabled: true,
+        };
+        chat.apply_interrupt_mode_to_composer();
+        chat
     }
 
     pub fn desired_height(&self, width: u16) -> u16 {
@@ -1143,6 +1150,9 @@ impl ChatWidget {
             SlashCommand::Model => {
                 self.open_model_popup();
             }
+            SlashCommand::Interrupt => {
+                self.open_interrupt_popup();
+            }
             SlashCommand::Approvals => {
                 self.open_approvals_popup();
             }
@@ -1267,44 +1277,83 @@ impl ChatWidget {
         self.app_event_tx.send(AppEvent::InsertHistoryCell(cell));
     }
 
+    fn message_to_items(user_message: &UserMessage) -> Vec<InputItem> {
+        let mut items: Vec<InputItem> = Vec::new();
+        if !user_message.text.is_empty() {
+            items.push(InputItem::Text {
+                text: user_message.text.clone(),
+            });
+        }
+        for path in &user_message.image_paths {
+            items.push(InputItem::LocalImage { path: path.clone() });
+        }
+        items
+    }
+
     fn submit_user_message(&mut self, user_message: UserMessage) {
-        let UserMessage { text, image_paths } = user_message;
-        if text.is_empty() && image_paths.is_empty() {
+        if user_message.text.is_empty() && user_message.image_paths.is_empty() {
             return;
         }
 
         self.capture_ghost_snapshot();
 
-        let mut items: Vec<InputItem> = Vec::new();
-
-        if !text.is_empty() {
-            items.push(InputItem::Text { text: text.clone() });
-        }
-
-        for path in image_paths {
-            items.push(InputItem::LocalImage { path });
-        }
+        let items = Self::message_to_items(&user_message);
 
         self.codex_op_tx
-            .send(Op::UserInput { items })
+            .send(Op::UserInput {
+                items,
+                intervention: None,
+            })
             .unwrap_or_else(|e| {
                 tracing::error!("failed to send message: {e}");
             });
 
         // Persist the text to cross-session message history.
-        if !text.is_empty() {
+        if !user_message.text.is_empty() {
             self.codex_op_tx
-                .send(Op::AddToHistory { text: text.clone() })
+                .send(Op::AddToHistory {
+                    text: user_message.text.clone(),
+                })
                 .unwrap_or_else(|e| {
                     tracing::error!("failed to send AddHistory op: {e}");
                 });
         }
 
         // Only show the text portion in conversation history.
-        if !text.is_empty() {
-            self.add_to_history(history_cell::new_user_prompt(text));
+        if !user_message.text.is_empty() {
+            self.add_to_history(history_cell::new_user_prompt(user_message.text));
         }
         self.needs_final_message_separator = false;
+    }
+
+    fn submit_interrupt_message(&mut self, user_message: UserMessage, mode: InterventionMode) {
+        if user_message.text.is_empty() && user_message.image_paths.is_empty() {
+            return;
+        }
+
+        self.capture_ghost_snapshot();
+
+        let items = Self::message_to_items(&user_message);
+
+        self.codex_op_tx
+            .send(Op::UserInput {
+                items,
+                intervention: Some(mode),
+            })
+            .unwrap_or_else(|e| {
+                tracing::error!("failed to send interrupt message: {e}");
+            });
+
+        if !user_message.text.is_empty() {
+            self.codex_op_tx
+                .send(Op::AddToHistory {
+                    text: user_message.text.clone(),
+                })
+                .unwrap_or_else(|e| {
+                    tracing::error!("failed to send AddHistory op: {e}");
+                });
+            self.add_to_history(history_cell::new_user_prompt(user_message.text));
+        }
     }
 
     fn capture_ghost_snapshot(&mut self) {
@@ -1549,13 +1598,25 @@ impl ChatWidget {
     }
 
     fn toggle_interrupt_mode(&mut self) {
-        self.interrupt_mode_enabled = !self.interrupt_mode_enabled;
-        self.bottom_pane
-            .set_interrupt_mode(self.interrupt_mode_enabled);
-        if !self.interrupt_mode_enabled {
+        let enabled = !self.interrupt_mode_enabled;
+        self.set_interrupt_mode_enabled(enabled);
+    }
+
+    fn apply_interrupt_mode_to_composer(&mut self) {
+        let active = self.interrupt_mode_enabled && self.bottom_pane.is_task_running();
+        self.bottom_pane.set_interrupt_mode(active);
+        if !active {
             self.bottom_pane
                 .set_interrupt_intent(ComposerInterruptIntent::Add);
         }
+    }
+
+    pub(crate) fn set_interrupt_mode_enabled(&mut self, enabled: bool) {
+        if self.interrupt_mode_enabled == enabled {
+            return;
+        }
+        self.interrupt_mode_enabled = enabled;
+        self.apply_interrupt_mode_to_composer();
         self.request_redraw();
     }
 
@@ -1566,13 +1627,10 @@ impl ChatWidget {
 
         match classification {
             InterruptSubmission::Add(message) => {
-                self.queued_user_messages.push_back(message);
-                self.refresh_queued_user_messages();
+                self.submit_interrupt_message(message, InterventionMode::Add);
             }
             InterruptSubmission::Interrupt(message) => {
-                self.submit_op(Op::Interrupt);
-                self.queued_user_messages.push_front(message);
-                self.refresh_queued_user_messages();
+                self.submit_interrupt_message(message, InterventionMode::Interrupt);
             }
         }
 
@@ -1625,24 +1683,9 @@ impl ChatWidget {
             base_intent
         };
 
-        const ADD_PREFIX: &str = "before going further, know that the user also want to add that..";
-        const INTERRUPT_PREFIX: &str = "Wait , it seems the user have something more to say  :";
-
         match intent {
-            ComposerInterruptIntent::Add => {
-                if user_message.text.is_empty() {
-                    user_message.text = ADD_PREFIX.to_string();
-                } else {
-                    user_message.text = format!("{ADD_PREFIX} {}", user_message.text);
-                }
-                Some(InterruptSubmission::Add(user_message))
-            }
+            ComposerInterruptIntent::Add => Some(InterruptSubmission::Add(user_message)),
             ComposerInterruptIntent::Interrupt => {
-                if user_message.text.is_empty() {
-                    user_message.text = INTERRUPT_PREFIX.to_string();
-                } else {
-                    user_message.text = format!("{INTERRUPT_PREFIX} {}", user_message.text);
-                }
                 Some(InterruptSubmission::Interrupt(user_message))
             }
         }
@@ -1765,6 +1808,46 @@ impl ChatWidget {
             title: Some("Select Model and Effort".to_string()),
             subtitle: Some("Switch the model for this and future Codex CLI sessions".to_string()),
             footer_hint: Some("Press enter to select reasoning effort, or esc to dismiss.".into()),
+            items,
+            ..Default::default()
+        });
+    }
+
+    pub(crate) fn open_interrupt_popup(&mut self) {
+        let mut items: Vec<SelectionItem> = Vec::new();
+        let options = [
+            (
+                true,
+                "On",
+                "Inject addenda or interruptions immediately during active tasks.",
+            ),
+            (
+                false,
+                "Off",
+                "Queue follow-up messages until the task finishes running.",
+            ),
+        ];
+
+        for (enabled, label, description) in options {
+            let is_current = self.interrupt_mode_enabled == enabled;
+            let actions: Vec<SelectionAction> = vec![Box::new(move |tx| {
+                tx.send(AppEvent::UpdateInterruptMode(enabled));
+            })];
+
+            items.push(SelectionItem {
+                name: label.to_string(),
+                description: Some(description.to_string()),
+                is_current,
+                actions,
+                dismiss_on_select: true,
+                ..Default::default()
+            });
+        }
+
+        self.bottom_pane.show_selection_view(SelectionViewParams {
+            title: Some("Interrupt Mode".to_string()),
+            subtitle: Some("Choose how Codex handles new input while it is working.".to_string()),
+            footer_hint: Some(standard_popup_hint_line()),
             items,
             ..Default::default()
         });

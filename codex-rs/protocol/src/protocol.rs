@@ -60,6 +60,9 @@ pub enum Op {
     UserInput {
         /// User input items, see `InputItem`
         items: Vec<InputItem>,
+        /// Optional user intervention metadata applied while a task is running.
+        #[serde(skip_serializing_if = "Option::is_none")]
+        intervention: Option<InterventionMode>,
     },
 
     /// Similar to [`Op::UserInput`], but contains additional context required
@@ -405,6 +408,13 @@ pub enum InputItem {
     LocalImage {
         path: std::path::PathBuf,
     },
+}
+
+#[derive(Debug, Clone, Copy, Deserialize, Serialize, PartialEq, Eq, TS)]
+#[serde(rename_all = "snake_case")]
+pub enum InterventionMode {
+    Add,
+    Interrupt,
 }
 
 /// Event Queue Entry - events from agent

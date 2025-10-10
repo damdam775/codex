@@ -45,6 +45,7 @@ async fn interrupt_long_running_tool_emits_turn_aborted() {
             items: vec![InputItem::Text {
                 text: "start sleep".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();

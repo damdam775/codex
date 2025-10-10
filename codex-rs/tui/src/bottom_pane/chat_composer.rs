@@ -55,6 +55,7 @@ use codex_file_search::FileMatch;
 use std::cell::RefCell;
 use std::collections::HashMap;
 use std::env;
+use std::ops::Range;
 use std::path::Path;
 use std::path::PathBuf;
 use std::process::Child;
@@ -64,10 +65,12 @@ use std::time::Duration;
 use std::time::Instant;
 use tracing::warn;
 use unicode_width::UnicodeWidthStr;
+use url::Url;
 
 /// If the pasted content exceeds this number of characters, replace it with a
 /// placeholder in the UI.
 const LARGE_PASTE_CHAR_THRESHOLD: usize = 1000;
+const IMAGE_EXTENSIONS: [&str; 7] = [".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp", ".svg"];
 
 /// Result returned when the user interacts with the text area.
 #[derive(Debug, PartialEq)]
@@ -82,6 +85,40 @@ struct AttachedImage {
     placeholder: String,
     path: PathBuf,
     element_id: u64,
+}
+
+#[derive(Clone, Debug)]
+struct DetectedImage {
+    placeholder: String,
+    element_id: u64,
+    source: ImagePreviewSource,
+}
+
+#[derive(Clone, Debug)]
+struct DetectedImageCandidate {
+    range: Range<usize>,
+    placeholder: String,
+    source: ImagePreviewSource,
+}
+
+#[derive(Clone, Copy, Debug)]
+struct ImageEntryMeta {
+    kind: ImageSelectionKind,
+    index: usize,
+    element_id: u64,
+    start: usize,
+}
+
+struct SelectedImageEntry {
+    placeholder: String,
+    element_id: u64,
+    source: ImagePreviewSource,
+}
+
+#[derive(Clone, Debug)]
+enum ImagePreviewSource {
+    Path(PathBuf),
+    Url(String),
 }
 
 enum PromptSelectionMode {
@@ -108,8 +145,15 @@ struct InterruptUiState {
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 struct AttachmentSelection {
+    kind: ImageSelectionKind,
     index: usize,
     element_id: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ImageSelectionKind {
+    Attached,
+    Detected,
 }
 
 struct PreviewHandle {
@@ -131,6 +175,7 @@ pub(crate) struct ChatComposer {
     pending_pastes: Vec<(String, String)>,
     has_focus: bool,
     attached_images: Vec<AttachedImage>,
+    detected_images: Vec<DetectedImage>,
     selected_attachment: Option<AttachmentSelection>,
     preview: Option<PreviewHandle>,
     preview_active: bool,
@@ -180,6 +225,7 @@ impl ChatComposer {
             pending_pastes: Vec::new(),
             has_focus: has_input_focus,
             attached_images: Vec::new(),
+            detected_images: Vec::new(),
             selected_attachment: None,
             preview: None,
             preview_active: false,
@@ -309,6 +355,7 @@ impl ChatComposer {
         } else {
             self.sync_file_search_popup();
         }
+        self.refresh_detected_images();
         true
     }
 
@@ -356,6 +403,7 @@ impl ChatComposer {
         self.textarea.set_cursor(0);
         self.sync_command_popup();
         self.sync_file_search_popup();
+        self.refresh_detected_images();
     }
 
     /// Get the current composer text.
@@ -383,6 +431,224 @@ impl ChatComposer {
         images.into_iter().map(|img| img.path).collect()
     }
 
+    fn refresh_detected_images(&mut self) {
+        if matches!(
+            self.selected_attachment,
+            Some(selection) if selection.kind == ImageSelectionKind::Detected
+        ) {
+            self.clear_selected_attachment();
+        }
+
+        for detected in self.detected_images.drain(..) {
+            let _ = self.textarea.remove_element(detected.element_id);
+        }
+
+        let text = self.textarea.text();
+        if text.is_empty() {
+            return;
+        }
+
+        for candidate in Self::scan_for_image_tokens(text) {
+            if self.textarea.range_overlaps_element(&candidate.range) {
+                continue;
+            }
+            if let Some(element_id) = self
+                .textarea
+                .create_element_for_range(candidate.range.clone())
+            {
+                self.detected_images.push(DetectedImage {
+                    placeholder: candidate.placeholder,
+                    element_id,
+                    source: candidate.source,
+                });
+            }
+        }
+
+        self.reconcile_selected_attachment();
+    }
+
+    fn scan_for_image_tokens(text: &str) -> Vec<DetectedImageCandidate> {
+        let mut out = Vec::new();
+        let mut token_start: Option<usize> = None;
+
+        for (idx, ch) in text.char_indices() {
+            if ch.is_whitespace() {
+                if let Some(start) = token_start.take()
+                    && let Some(candidate) = Self::token_candidate(text, start, idx)
+                {
+                    out.push(candidate);
+                }
+            } else if token_start.is_none() {
+                token_start = Some(idx);
+            }
+        }
+
+        if let Some(start) = token_start
+            && let Some(candidate) = Self::token_candidate(text, start, text.len())
+        {
+            out.push(candidate);
+        }
+
+        out
+    }
+
+    fn token_candidate(text: &str, start: usize, end: usize) -> Option<DetectedImageCandidate> {
+        let (trim_start, trim_end) = Self::trim_token_bounds(text, start, end)?;
+        let token = &text[trim_start..trim_end];
+        if token.is_empty() {
+            return None;
+        }
+        if token.starts_with('[') {
+            let lower = token.to_ascii_lowercase();
+            if lower.starts_with("[image ") {
+                return None;
+            }
+        }
+
+        let source = Self::classify_image_source(token)?;
+        Some(DetectedImageCandidate {
+            range: trim_start..trim_end,
+            placeholder: token.to_string(),
+            source,
+        })
+    }
+
+    fn trim_token_bounds(text: &str, start: usize, end: usize) -> Option<(usize, usize)> {
+        if start >= end || end > text.len() {
+            return None;
+        }
+        let mut trim_start = start;
+        let mut trim_end = end;
+
+        while trim_start < trim_end {
+            let Some(ch) = text[trim_start..].chars().next() else {
+                break;
+            };
+            if matches!(ch, '(' | '[' | '{' | '<' | '"' | '\'') {
+                trim_start += ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        while trim_end > trim_start {
+            let Some(ch) = text[..trim_end].chars().next_back() else {
+                break;
+            };
+            if matches!(
+                ch,
+                '.' | ',' | '!' | '?' | ':' | ';' | ')' | ']' | '}' | '>' | '"' | '\''
+            ) {
+                trim_end -= ch.len_utf8();
+            } else {
+                break;
+            }
+        }
+
+        if trim_start >= trim_end {
+            None
+        } else {
+            Some((trim_start, trim_end))
+        }
+    }
+
+    fn classify_image_source(token: &str) -> Option<ImagePreviewSource> {
+        if let Ok(url) = Url::parse(token) {
+            match url.scheme() {
+                "http" | "https" => {
+                    if Self::url_has_image_extension(&url) {
+                        return Some(ImagePreviewSource::Url(token.to_string()));
+                    }
+                }
+                "file" => {
+                    if let Ok(path) = url.to_file_path()
+                        && Self::str_has_image_extension(path.to_string_lossy().as_ref())
+                    {
+                        return Some(ImagePreviewSource::Path(path));
+                    }
+                }
+                _ => {}
+            }
+            return None;
+        }
+
+        if token.starts_with("http://") || token.starts_with("https://") {
+            return None;
+        }
+
+        if Self::str_has_image_extension(token) {
+            return Some(ImagePreviewSource::Path(PathBuf::from(token)));
+        }
+
+        None
+    }
+
+    fn str_has_image_extension(input: &str) -> bool {
+        let base = input
+            .split(['?', '#'])
+            .next()
+            .unwrap_or(input)
+            .to_ascii_lowercase();
+        IMAGE_EXTENSIONS.iter().any(|ext| base.ends_with(ext))
+    }
+
+    fn url_has_image_extension(url: &Url) -> bool {
+        if let Some(mut segments) = url.path_segments()
+            && let Some(last) = segments.next_back()
+        {
+            return Self::str_has_image_extension(last);
+        }
+        false
+    }
+
+    fn ordered_image_entries(&self) -> Vec<ImageEntryMeta> {
+        let mut entries: Vec<ImageEntryMeta> = Vec::new();
+        for (index, image) in self.attached_images.iter().enumerate() {
+            if let Some(range) = self.textarea.element_range(image.element_id) {
+                entries.push(ImageEntryMeta {
+                    kind: ImageSelectionKind::Attached,
+                    index,
+                    element_id: image.element_id,
+                    start: range.start,
+                });
+            }
+        }
+        for (index, image) in self.detected_images.iter().enumerate() {
+            if let Some(range) = self.textarea.element_range(image.element_id) {
+                entries.push(ImageEntryMeta {
+                    kind: ImageSelectionKind::Detected,
+                    index,
+                    element_id: image.element_id,
+                    start: range.start,
+                });
+            }
+        }
+        entries.sort_by_key(|entry| entry.start);
+        entries
+    }
+
+    fn selected_image_entry(&self) -> Option<SelectedImageEntry> {
+        let selection = self.selected_attachment?;
+        match selection.kind {
+            ImageSelectionKind::Attached => {
+                let image = self.attached_images.get(selection.index)?;
+                Some(SelectedImageEntry {
+                    placeholder: image.placeholder.clone(),
+                    element_id: image.element_id,
+                    source: ImagePreviewSource::Path(image.path.clone()),
+                })
+            }
+            ImageSelectionKind::Detected => {
+                let image = self.detected_images.get(selection.index)?;
+                Some(SelectedImageEntry {
+                    placeholder: image.placeholder.clone(),
+                    element_id: image.element_id,
+                    source: image.source.clone(),
+                })
+            }
+        }
+    }
+
     fn selection_display_for(placeholder: &str) -> String {
         let target_width = UnicodeWidthStr::width(placeholder);
         let base = "[SHOW]";
@@ -396,16 +662,29 @@ impl ChatComposer {
 
     fn selection_style() -> Style {
         Style::default()
-            .fg(Color::Rgb(255, 178, 102))
+            .fg(Color::Yellow)
             .add_modifier(Modifier::BOLD)
     }
 
-    fn apply_selection_visuals(&mut self, index: usize) -> bool {
-        let Some(image) = self.attached_images.get(index) else {
-            return false;
+    fn apply_selection_visuals(&mut self, kind: ImageSelectionKind, index: usize) -> bool {
+        let (placeholder, element_id) = match kind {
+            ImageSelectionKind::Attached => {
+                let Some(image) = self.attached_images.get(index) else {
+                    return false;
+                };
+                (&image.placeholder, image.element_id)
+            }
+            ImageSelectionKind::Detected => {
+                let Some(image) = self.detected_images.get(index) else {
+                    return false;
+                };
+                (&image.placeholder, image.element_id)
+            }
         };
-        let element_id = image.element_id;
-        let display = Self::selection_display_for(&image.placeholder);
+        if !self.textarea.element_exists(element_id) {
+            return false;
+        }
+        let display = Self::selection_display_for(placeholder);
         let style = Self::selection_style();
         let _ = self.textarea.set_element_style(element_id, style);
         let _ = self.textarea.set_element_display_override(
@@ -413,35 +692,47 @@ impl ChatComposer {
             Some(display),
             Some("▸".to_string()),
         );
-        self.selected_attachment = Some(AttachmentSelection { index, element_id });
+        self.selected_attachment = Some(AttachmentSelection {
+            kind,
+            index,
+            element_id,
+        });
         true
     }
 
     fn clear_selected_attachment(&mut self) {
         self.stop_preview(false);
-        if let Some(selection) = self.selected_attachment.take() {
-            if self.textarea.element_exists(selection.element_id) {
-                let _ = self
-                    .textarea
-                    .set_element_style(selection.element_id, Style::default().fg(Color::Cyan));
-                let _ =
-                    self.textarea
-                        .set_element_display_override(selection.element_id, None, None);
-            }
+        if let Some(selection) = self.selected_attachment.take()
+            && self.textarea.element_exists(selection.element_id)
+        {
+            let _ = self
+                .textarea
+                .set_element_style(selection.element_id, Style::default().fg(Color::Cyan));
+            let _ = self
+                .textarea
+                .set_element_display_override(selection.element_id, None, None);
         }
     }
 
     fn focus_next_attachment(&mut self) -> bool {
-        if self.attached_images.is_empty() {
+        let entries = self.ordered_image_entries();
+        if entries.is_empty() {
             return false;
         }
         self.reconcile_selected_attachment();
-        let next_index = match self.selected_attachment {
-            Some(selection) => (selection.index + 1) % self.attached_images.len(),
-            None => 0,
+        let next_entry = match self.selected_attachment {
+            Some(selection) => {
+                let current_pos = entries
+                    .iter()
+                    .position(|entry| entry.element_id == selection.element_id)
+                    .unwrap_or(0);
+                let next_idx = (current_pos + 1) % entries.len();
+                entries[next_idx]
+            }
+            None => entries[0],
         };
         self.clear_selected_attachment();
-        self.apply_selection_visuals(next_index)
+        self.apply_selection_visuals(next_entry.kind, next_entry.index)
     }
 
     fn handle_attachment_tab(&mut self, key_event: &KeyEvent) -> bool {
@@ -479,27 +770,22 @@ impl ChatComposer {
         if self.preview_active {
             return true;
         }
-        let Some(selection) = self.selected_attachment else {
+        let Some(entry) = self.selected_image_entry() else {
             return false;
         };
-        let Some(image) = self
-            .attached_images
-            .iter()
-            .find(|img| img.element_id == selection.element_id)
-        else {
-            return false;
-        };
-        match self.spawn_preview_process(&image.path) {
+        let SelectedImageEntry {
+            placeholder,
+            element_id,
+            source,
+        } = entry;
+        match self.spawn_preview_process(&source) {
             Ok(child) => {
                 let _ = self.textarea.set_element_display_override(
-                    selection.element_id,
-                    Some(image.placeholder.clone()),
+                    element_id,
+                    Some(placeholder),
                     Some("»".to_string()),
                 );
-                self.preview = Some(PreviewHandle {
-                    child,
-                    element_id: selection.element_id,
-                });
+                self.preview = Some(PreviewHandle { child, element_id });
                 self.preview_active = true;
                 true
             }
@@ -520,29 +806,29 @@ impl ChatComposer {
             let _ = handle.child.kill();
             let _ = handle.child.wait();
         }
-        if revert_to_show {
-            if let Some(element_id) = element_id {
-                if self.textarea.element_exists(element_id) {
-                    if let Some(image) = self
-                        .attached_images
-                        .iter()
-                        .find(|img| img.element_id == element_id)
-                    {
-                        let display = Self::selection_display_for(&image.placeholder);
-                        let _ = self.textarea.set_element_display_override(
-                            element_id,
-                            Some(display),
-                            Some("▸".to_string()),
-                        );
-                    }
-                }
-            }
+        if revert_to_show
+            && let Some(element_id) = element_id
+            && self.textarea.element_exists(element_id)
+            && let Some(placeholder) = self.placeholder_for_element(element_id)
+        {
+            let display = Self::selection_display_for(&placeholder);
+            let _ = self.textarea.set_element_display_override(
+                element_id,
+                Some(display),
+                Some("▸".to_string()),
+            );
         }
         self.preview_active = false;
     }
 
-    fn spawn_preview_process(&self, path: &Path) -> Result<Child, String> {
+    fn spawn_preview_process(&self, source: &ImagePreviewSource) -> Result<Child, String> {
         let (cols, rows) = terminal::size().unwrap_or((120, 32));
+        let (source_kind, source_value) = match source {
+            ImagePreviewSource::Path(path) => {
+                ("path".to_string(), path.to_string_lossy().to_string())
+            }
+            ImagePreviewSource::Url(url) => ("url".to_string(), url.clone()),
+        };
         let script = r#"
 import sys
 from pathlib import Path
@@ -555,11 +841,16 @@ except Exception:
     PIL_AVAILABLE = False
 
 def main():
-    path = Path(sys.argv[1])
-    cols = int(sys.argv[2])
-    rows = int(sys.argv[3])
+    source_kind = sys.argv[1]
+    target = sys.argv[2]
+    cols = int(sys.argv[3])
+    rows = int(sys.argv[4])
     root = tk.Tk()
-    root.title(path.name)
+    if source_kind == "path":
+        path = Path(target)
+        root.title(path.name or "image preview")
+    else:
+        root.title(target)
     root.attributes('-topmost', True)
     root.resizable(False, False)
 
@@ -569,21 +860,37 @@ def main():
     max_h = max(1, int(rows * cell_h / 4))
 
     try:
-        if PIL_AVAILABLE:
-            img = Image.open(path)
+        if source_kind == "url":
+            if not PIL_AVAILABLE:
+                raise RuntimeError("previewing URLs requires Pillow support")
+            import io
+            import urllib.request
+
+            with urllib.request.urlopen(target, timeout=5) as response:
+                data = response.read()
+            img = Image.open(io.BytesIO(data))
             scale = min(max_w / img.width, max_h / img.height, 1.0)
             new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
             if new_size != img.size:
                 img = img.resize(new_size, Image.LANCZOS)
             photo = ImageTk.PhotoImage(img)
         else:
-            photo = tk.PhotoImage(file=str(path))
-            width = photo.width()
-            height = photo.height()
-            scale = min(max_w / width, max_h / height, 1.0)
-            if scale < 1.0:
-                step = max(1, int(round(1 / scale)))
-                photo = photo.subsample(step, step)
+            path = Path(target)
+            if PIL_AVAILABLE:
+                img = Image.open(path)
+                scale = min(max_w / img.width, max_h / img.height, 1.0)
+                new_size = (max(1, int(img.width * scale)), max(1, int(img.height * scale)))
+                if new_size != img.size:
+                    img = img.resize(new_size, Image.LANCZOS)
+                photo = ImageTk.PhotoImage(img)
+            else:
+                photo = tk.PhotoImage(file=str(path))
+                width = photo.width()
+                height = photo.height()
+                scale = min(max_w / width, max_h / height, 1.0)
+                if scale < 1.0:
+                    step = max(1, int(round(1 / scale)))
+                    photo = photo.subsample(step, step)
     except Exception as exc:
         label = tk.Label(root, text=f"Unable to preview image: {exc}", padx=12, pady=12)
         label.pack()
@@ -604,7 +911,8 @@ if __name__ == '__main__':
             let result = command
                 .arg("-c")
                 .arg(script)
-                .arg(path.to_string_lossy().to_string())
+                .arg(&source_kind)
+                .arg(&source_value)
                 .arg(cols.to_string())
                 .arg(rows.to_string())
                 .stdin(Stdio::null())
@@ -624,12 +932,30 @@ if __name__ == '__main__':
         Err(last_error.unwrap_or_else(|| "python interpreter not found".to_string()))
     }
 
+    fn placeholder_for_element(&self, element_id: u64) -> Option<String> {
+        if let Some(image) = self
+            .attached_images
+            .iter()
+            .find(|img| img.element_id == element_id)
+        {
+            return Some(image.placeholder.clone());
+        }
+        if let Some(image) = self
+            .detected_images
+            .iter()
+            .find(|img| img.element_id == element_id)
+        {
+            return Some(image.placeholder.clone());
+        }
+        None
+    }
+
     fn python_candidates() -> Vec<String> {
         let mut out = Vec::new();
-        if let Ok(value) = env::var("PYTHON") {
-            if !value.trim().is_empty() {
-                out.push(value);
-            }
+        if let Ok(value) = env::var("PYTHON")
+            && !value.trim().is_empty()
+        {
+            out.push(value);
         }
         out.push("python3".to_string());
         out.push("python".to_string());
@@ -643,15 +969,30 @@ if __name__ == '__main__':
                 .iter()
                 .position(|img| img.element_id == selection.element_id)
             {
-                if idx != selection.index {
+                if selection.kind != ImageSelectionKind::Attached || idx != selection.index {
                     self.selected_attachment = Some(AttachmentSelection {
+                        kind: ImageSelectionKind::Attached,
                         index: idx,
                         element_id: selection.element_id,
                     });
                 }
-            } else {
-                self.clear_selected_attachment();
+                return;
             }
+            if let Some(idx) = self
+                .detected_images
+                .iter()
+                .position(|img| img.element_id == selection.element_id)
+            {
+                if selection.kind != ImageSelectionKind::Detected || idx != selection.index {
+                    self.selected_attachment = Some(AttachmentSelection {
+                        kind: ImageSelectionKind::Detected,
+                        index: idx,
+                        element_id: selection.element_id,
+                    });
+                }
+                return;
+            }
+            self.clear_selected_attachment();
         }
     }
 
@@ -708,7 +1049,7 @@ if __name__ == '__main__':
         }
         let (label, color) = match self.interrupt_ui.intent {
             ComposerInterruptIntent::Add => ("[Add] ", Color::Yellow),
-            ComposerInterruptIntent::Interrupt => ("[interrupt] ", Color::Rgb(255, 140, 0)),
+            ComposerInterruptIntent::Interrupt => ("[interrupt] ", Color::LightRed),
         };
         let style = Style::default().fg(color).add_modifier(Modifier::BOLD);
         Some((label.to_string(), style))
@@ -757,6 +1098,7 @@ if __name__ == '__main__':
         self.textarea.insert_str(text);
         self.sync_command_popup();
         self.sync_file_search_popup();
+        self.refresh_detected_images();
     }
 
     /// Handle a key event coming from the main UI.
@@ -944,6 +1286,7 @@ if __name__ == '__main__':
         let text_after = self.textarea.text();
         self.pending_pastes
             .retain(|(placeholder, _)| text_after.contains(placeholder));
+        self.refresh_detected_images();
         (InputResult::None, true)
     }
 
@@ -1418,10 +1761,9 @@ if __name__ == '__main__':
 
         if matches!(input.kind, KeyEventKind::Press | KeyEventKind::Repeat)
             && !matches!(input.code, KeyCode::Tab | KeyCode::Right)
+            && self.selected_attachment.is_some()
         {
-            if self.selected_attachment.is_some() {
-                self.clear_selected_attachment();
-            }
+            self.clear_selected_attachment();
         }
 
         if let KeyEvent {
@@ -1430,15 +1772,13 @@ if __name__ == '__main__':
             kind,
             ..
         } = input
+            && self.interrupt_ui.enabled
+            && self.is_task_running
+            && modifiers.is_empty()
+            && matches!(kind, KeyEventKind::Press)
+            && self.toggle_interrupt_intent()
         {
-            if self.interrupt_ui.enabled
-                && self.is_task_running
-                && modifiers.is_empty()
-                && matches!(kind, KeyEventKind::Press)
-                && self.toggle_interrupt_intent()
-            {
-                return (InputResult::None, true);
-            }
+            return (InputResult::None, true);
         }
 
         if !matches!(input.code, KeyCode::Esc) {
@@ -1573,6 +1913,8 @@ if __name__ == '__main__':
             self.attached_images = kept;
             self.reconcile_selected_attachment();
         }
+
+        self.refresh_detected_images();
 
         (InputResult::None, true)
     }
@@ -2030,7 +2372,7 @@ mod tests {
     use crate::bottom_pane::AppEventSender;
     use crate::bottom_pane::ChatComposer;
     use crate::bottom_pane::InputResult;
-    use crate::bottom_pane::chat_composer::AttachedImage;
+
     use crate::bottom_pane::chat_composer::LARGE_PASTE_CHAR_THRESHOLD;
     use crate::bottom_pane::prompt_args::extract_positional_args_for_prompt_line;
     use crate::bottom_pane::textarea::TextArea;
