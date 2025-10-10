@@ -81,20 +81,30 @@ if (wantsNative) {
   }
 
   if (!targetTriple) {
-    throw new Error(`Unsupported platform: ${platform} (${arch})`);
-  }
-  const binaryPath = path.join(
-    __dirname,
-    "..",
-    "bin",
-    `codex-${targetTriple}${platform === "win32" ? ".exe" : ""}`,
-  );
-  const result = spawnSync(binaryPath, process.argv.slice(2), {
-    stdio: "inherit",
-  });
+    console.warn(
+      `No native Codex binary is available for ${platform} (${arch}); falling back to the JavaScript implementation.`,
+    );
+  } else {
+    const binaryPath = path.join(
+      __dirname,
+      "..",
+      "bin",
+      `codex-${targetTriple}${platform === "win32" ? ".exe" : ""}`,
+    );
 
-  const exitCode = typeof result.status === "number" ? result.status : 1;
-  process.exit(exitCode);
+    if (fs.existsSync(binaryPath)) {
+      const result = spawnSync(binaryPath, process.argv.slice(2), {
+        stdio: "inherit",
+      });
+
+      const exitCode = typeof result.status === "number" ? result.status : 1;
+      process.exit(exitCode);
+    } else {
+      console.warn(
+        `Requested native Codex binary (${path.basename(binaryPath)}) was not found; falling back to the JavaScript implementation.`,
+      );
+    }
+  }
 }
 
 // Fallback: execute the original JavaScript CLI.
