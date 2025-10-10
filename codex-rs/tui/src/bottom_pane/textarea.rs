@@ -668,6 +668,25 @@ impl TextArea {
         id
     }
 
+    pub fn create_element_for_range(&mut self, range: Range<usize>) -> Option<u64> {
+        if range.start >= range.end || range.end > self.text.len() {
+            return None;
+        }
+        if self.range_overlaps_element(&range) {
+            return None;
+        }
+        let id = self.next_element_id;
+        self.next_element_id = self.next_element_id.saturating_add(1);
+        self.add_element(TextElement {
+            id,
+            range,
+            style: default_element_style(),
+            display_override: None,
+            suffix: None,
+        });
+        Some(id)
+    }
+
     fn add_element(&mut self, element: TextElement) {
         self.elements.push(element);
         self.elements.sort_by_key(|e| e.range.start);
@@ -679,6 +698,20 @@ impl TextArea {
 
     pub fn element_exists(&self, id: u64) -> bool {
         self.find_element_index_by_id(id).is_some()
+    }
+
+    pub fn remove_element(&mut self, id: u64) -> bool {
+        if let Some(idx) = self.find_element_index_by_id(id) {
+            self.elements.remove(idx);
+            true
+        } else {
+            false
+        }
+    }
+
+    pub fn element_range(&self, id: u64) -> Option<Range<usize>> {
+        self.find_element_index_by_id(id)
+            .map(|idx| self.elements[idx].range.clone())
     }
 
     pub fn set_element_style(&mut self, id: u64, style: Style) -> bool {
@@ -697,10 +730,10 @@ impl TextArea {
         suffix: Option<String>,
     ) -> bool {
         if let Some(idx) = self.find_element_index_by_id(id) {
-            if let Some(ref text) = display {
-                if text.len() != self.elements[idx].range.len() {
-                    return false;
-                }
+            if let Some(ref text) = display
+                && text.len() != self.elements[idx].range.len()
+            {
+                return false;
             }
             self.elements[idx].display_override = display;
             self.elements[idx].suffix = suffix;
@@ -796,6 +829,12 @@ impl TextArea {
                 e.range.end = new_end;
             }
         }
+    }
+
+    pub fn range_overlaps_element(&self, range: &Range<usize>) -> bool {
+        self.elements
+            .iter()
+            .any(|e| e.range.start < range.end && range.start < e.range.end)
     }
 
     fn update_elements_after_replace(&mut self, start: usize, end: usize, inserted_len: usize) {
@@ -1008,21 +1047,21 @@ impl TextArea {
                     }
                     let rel_start = overlap_start.saturating_sub(elem.range.start);
                     let rel_end = overlap_end.saturating_sub(elem.range.start);
-                    if let Some(slice) = display.get(rel_start..rel_end) {
-                        if !slice.is_empty() {
-                            buf.set_string(area.x + x_off, y, slice, elem.style);
-                        }
+                    if let Some(slice) = display.get(rel_start..rel_end)
+                        && !slice.is_empty()
+                    {
+                        buf.set_string(area.x + x_off, y, slice, elem.style);
                     }
                 } else {
                     buf.set_string(area.x + x_off, y, original_slice, elem.style);
                 }
 
-                if let Some(suffix) = &elem.suffix {
-                    if elem.range.end <= line_range.end {
-                        let prefix = &self.text[line_range.start..elem.range.end];
-                        let suffix_x = prefix.width() as u16;
-                        buf.set_string(area.x + suffix_x, y, suffix, elem.style);
-                    }
+                if let Some(suffix) = &elem.suffix
+                    && elem.range.end <= line_range.end
+                {
+                    let prefix = &self.text[line_range.start..elem.range.end];
+                    let suffix_x = prefix.width() as u16;
+                    buf.set_string(area.x + suffix_x, y, suffix, elem.style);
                 }
             }
         }
