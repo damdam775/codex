@@ -569,6 +569,7 @@ async fn review_history_does_not_leak_into_parent_session() {
             items: vec![InputItem::Text {
                 text: followup.clone(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();

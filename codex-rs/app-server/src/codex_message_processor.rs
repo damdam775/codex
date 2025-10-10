@@ -996,6 +996,7 @@ impl CodexMessageProcessor {
         let _ = conversation
             .submit(Op::UserInput {
                 items: mapped_items,
+                intervention: None,
             })
             .await;
 

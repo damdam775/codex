@@ -34,6 +34,7 @@ async fn responses_api_emits_api_request_event() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -80,6 +81,7 @@ async fn process_sse_emits_tracing_for_output_item() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -124,6 +126,7 @@ async fn process_sse_emits_failed_event_on_parse_error() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -169,6 +172,7 @@ async fn process_sse_records_failed_event_when_stream_closes_without_completed()
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -226,6 +230,7 @@ async fn process_sse_failed_event_records_response_error_message() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -281,6 +286,7 @@ async fn process_sse_failed_event_logs_parse_error() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -331,6 +337,7 @@ async fn process_sse_failed_event_logs_missing_error() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -381,6 +388,7 @@ async fn process_sse_failed_event_logs_response_completed_parse_error() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -436,6 +444,7 @@ async fn process_sse_emits_completed_telemetry() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -496,6 +505,7 @@ async fn handle_response_item_records_tool_result_for_custom_tool_call() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -560,6 +570,7 @@ async fn handle_response_item_records_tool_result_for_function_call() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -634,6 +645,7 @@ async fn handle_response_item_records_tool_result_for_local_shell_missing_ids() 
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -692,6 +704,7 @@ async fn handle_response_item_records_tool_result_for_local_shell_call() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -790,6 +803,7 @@ async fn handle_container_exec_autoapprove_from_config_records_tool_decision() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -840,6 +854,7 @@ async fn handle_container_exec_user_approved_records_tool_decision() {
             items: vec![InputItem::Text {
                 text: "approved".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -906,6 +921,7 @@ async fn handle_container_exec_user_approved_for_session_records_tool_decision()
             items: vec![InputItem::Text {
                 text: "persist".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -972,6 +988,7 @@ async fn handle_sandbox_error_user_approves_retry_records_tool_decision() {
             items: vec![InputItem::Text {
                 text: "retry".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -1034,6 +1051,7 @@ async fn handle_container_exec_user_denies_records_tool_decision() {
             items: vec![InputItem::Text {
                 text: "deny".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -1100,6 +1118,7 @@ async fn handle_sandbox_error_user_approves_for_session_records_tool_decision() 
             items: vec![InputItem::Text {
                 text: "persist".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -1162,6 +1181,7 @@ async fn handle_sandbox_error_user_denies_records_tool_decision() {
             items: vec![InputItem::Text {
                 text: "deny".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();

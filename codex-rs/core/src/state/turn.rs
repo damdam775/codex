@@ -6,7 +6,8 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio::task::AbortHandle;
 
-use codex_protocol::models::ResponseInputItem;
+use codex_protocol::protocol::InputItem;
+use codex_protocol::protocol::InterventionMode;
 use tokio::sync::oneshot;
 
 use crate::protocol::ReviewDecision;
@@ -60,7 +61,13 @@ impl ActiveTurn {
 #[derive(Default)]
 pub(crate) struct TurnState {
     pending_approvals: HashMap<String, oneshot::Sender<ReviewDecision>>,
-    pending_input: Vec<ResponseInputItem>,
+    pending_input: Vec<PendingUserInput>,
+}
+
+#[derive(Clone)]
+pub(crate) struct PendingUserInput {
+    pub(crate) items: Vec<InputItem>,
+    pub(crate) intervention: Option<InterventionMode>,
 }
 
 impl TurnState {
@@ -84,11 +91,11 @@ impl TurnState {
         self.pending_input.clear();
     }
 
-    pub(crate) fn push_pending_input(&mut self, input: ResponseInputItem) {
+    pub(crate) fn push_pending_input(&mut self, input: PendingUserInput) {
         self.pending_input.push(input);
     }
 
-    pub(crate) fn take_pending_input(&mut self) -> Vec<ResponseInputItem> {
+    pub(crate) fn take_pending_input(&mut self) -> Vec<PendingUserInput> {
         if self.pending_input.is_empty() {
             Vec::with_capacity(0)
         } else {

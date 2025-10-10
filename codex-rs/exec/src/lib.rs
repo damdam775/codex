@@ -320,7 +320,12 @@ pub async fn run_main(cli: Cli, codex_linux_sandbox_exe: Option<PathBuf>) -> any
             .into_iter()
             .map(|path| InputItem::LocalImage { path })
             .collect();
-        let initial_images_event_id = conversation.submit(Op::UserInput { items }).await?;
+        let initial_images_event_id = conversation
+            .submit(Op::UserInput {
+                items,
+                intervention: None,
+            })
+            .await?;
         info!("Sent images with event ID: {initial_images_event_id}");
         while let Ok(event) = conversation.next_event().await {
             if event.id == initial_images_event_id

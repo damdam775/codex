@@ -317,6 +317,9 @@ impl App {
             AppEvent::UpdateReasoningEffort(effort) => {
                 self.on_update_reasoning_effort(effort);
             }
+            AppEvent::UpdateInterruptMode(enabled) => {
+                self.chat_widget.set_interrupt_mode_enabled(enabled);
+            }
             AppEvent::UpdateModel(model) => {
                 self.chat_widget.set_model(&model);
                 self.config.model = model.clone();

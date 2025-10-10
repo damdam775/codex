@@ -266,6 +266,7 @@ async fn resume_includes_initial_messages_and_sends_prior_items() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -338,6 +339,7 @@ async fn includes_conversation_id_and_model_headers_in_request() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -393,6 +395,7 @@ async fn includes_base_instructions_override_in_request() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -453,6 +456,7 @@ async fn chatgpt_auth_sends_correct_request() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -543,6 +547,7 @@ async fn prefers_apikey_when_config_prefers_apikey_even_with_chatgpt_tokens() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -582,6 +587,7 @@ async fn includes_user_instructions_message_in_request() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -797,6 +803,7 @@ async fn token_count_includes_rate_limits_snapshot() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -948,6 +955,7 @@ async fn usage_limit_error_emits_rate_limit_event() -> anyhow::Result<()> {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .expect("submission should succeed while emitting usage limit error events");
@@ -1016,6 +1024,7 @@ async fn context_window_error_sets_total_tokens_to_model_window() -> anyhow::Res
             items: vec![InputItem::Text {
                 text: "seed turn".into(),
             }],
+            intervention: None,
         })
         .await?;
 
@@ -1026,6 +1035,7 @@ async fn context_window_error_sets_total_tokens_to_model_window() -> anyhow::Res
             items: vec![InputItem::Text {
                 text: "trigger context window".into(),
             }],
+            intervention: None,
         })
         .await?;
 
@@ -1143,6 +1153,7 @@ async fn azure_overrides_assign_properties_used_for_responses_url() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -1220,6 +1231,7 @@ async fn env_var_overrides_loaded_auth() {
             items: vec![InputItem::Text {
                 text: "hello".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -1296,6 +1308,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
     codex
         .submit(Op::UserInput {
             items: vec![InputItem::Text { text: "U1".into() }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -1305,6 +1318,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
     codex
         .submit(Op::UserInput {
             items: vec![InputItem::Text { text: "U2".into() }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -1314,6 +1328,7 @@ async fn history_dedupes_streamed_and_final_messages_across_turns() {
     codex
         .submit(Op::UserInput {
             items: vec![InputItem::Text { text: "U3".into() }],
+            intervention: None,
         })
         .await
         .unwrap();

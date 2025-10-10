@@ -117,6 +117,7 @@ async fn codex_mini_latest_tools() {
             items: vec![InputItem::Text {
                 text: "hello 1".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -127,6 +128,7 @@ async fn codex_mini_latest_tools() {
             items: vec![InputItem::Text {
                 text: "hello 2".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -201,6 +203,7 @@ async fn prompt_tools_are_consistent_across_requests() {
             items: vec![InputItem::Text {
                 text: "hello 1".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -211,6 +214,7 @@ async fn prompt_tools_are_consistent_across_requests() {
             items: vec![InputItem::Text {
                 text: "hello 2".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -303,6 +307,7 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
             items: vec![InputItem::Text {
                 text: "hello 1".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -313,6 +318,7 @@ async fn prefixes_context_and_instructions_once_and_consistently_across_requests
             items: vec![InputItem::Text {
                 text: "hello 2".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -423,6 +429,7 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() {
             items: vec![InputItem::Text {
                 text: "hello 1".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -452,6 +459,7 @@ async fn overrides_turn_context_but_keeps_cached_prefix_and_key_constant() {
             items: vec![InputItem::Text {
                 text: "hello 2".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
@@ -551,6 +559,7 @@ async fn per_turn_overrides_keep_cached_prefix_and_key_constant() {
             items: vec![InputItem::Text {
                 text: "hello 1".into(),
             }],
+            intervention: None,
         })
         .await
         .unwrap();
