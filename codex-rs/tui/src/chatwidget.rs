@@ -64,6 +64,7 @@ use crate::bottom_pane::ApprovalRequest;
 use crate::bottom_pane::BottomPane;
 use crate::bottom_pane::BottomPaneParams;
 use crate::bottom_pane::CancellationEvent;
+use crate::bottom_pane::ComposerInterruptIntent;
 use crate::bottom_pane::InputResult;
 use crate::bottom_pane::SelectionAction;
 use crate::bottom_pane::SelectionItem;
@@ -260,11 +261,17 @@ pub(crate) struct ChatWidget {
     needs_final_message_separator: bool,
 
     last_rendered_width: std::cell::Cell<Option<usize>>,
+    interrupt_mode_enabled: bool,
 }
 
 struct UserMessage {
     text: String,
     image_paths: Vec<PathBuf>,
+}
+
+enum InterruptSubmission {
+    Add(UserMessage),
+    Interrupt(UserMessage),
 }
 
 impl From<String> for UserMessage {
@@ -938,6 +945,7 @@ impl ChatWidget {
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
+            interrupt_mode_enabled: false,
         }
     }
 
@@ -1001,6 +1009,7 @@ impl ChatWidget {
             ghost_snapshots_disabled: true,
             needs_final_message_separator: false,
             last_rendered_width: std::cell::Cell::new(None),
+            interrupt_mode_enabled: false,
         }
     }
 
@@ -1021,6 +1030,15 @@ impl ChatWidget {
                 ..
             } => {
                 self.on_ctrl_c();
+                return;
+            }
+            KeyEvent {
+                code: KeyCode::Char('i'),
+                modifiers: KeyModifiers::CONTROL,
+                kind: KeyEventKind::Press,
+                ..
+            } => {
+                self.toggle_interrupt_mode();
                 return;
             }
             KeyEvent {
@@ -1063,8 +1081,12 @@ impl ChatWidget {
                             image_paths: self.bottom_pane.take_recent_submission_images(),
                         };
                         if self.bottom_pane.is_task_running() {
-                            self.queued_user_messages.push_back(user_message);
-                            self.refresh_queued_user_messages();
+                            if self.interrupt_mode_enabled {
+                                self.handle_interrupt_submission(user_message);
+                            } else {
+                                self.queued_user_messages.push_back(user_message);
+                                self.refresh_queued_user_messages();
+                            }
                         } else {
                             self.submit_user_message(user_message);
                         }
@@ -1524,6 +1546,106 @@ impl ChatWidget {
         }
         self.pending_notification = Some(notification);
         self.request_redraw();
+    }
+
+    fn toggle_interrupt_mode(&mut self) {
+        self.interrupt_mode_enabled = !self.interrupt_mode_enabled;
+        self.bottom_pane
+            .set_interrupt_mode(self.interrupt_mode_enabled);
+        if !self.interrupt_mode_enabled {
+            self.bottom_pane
+                .set_interrupt_intent(ComposerInterruptIntent::Add);
+        }
+        self.request_redraw();
+    }
+
+    fn handle_interrupt_submission(&mut self, user_message: UserMessage) {
+        let Some(classification) = self.classify_interrupt_submission(user_message) else {
+            return;
+        };
+
+        match classification {
+            InterruptSubmission::Add(message) => {
+                self.queued_user_messages.push_back(message);
+                self.refresh_queued_user_messages();
+            }
+            InterruptSubmission::Interrupt(message) => {
+                self.submit_op(Op::Interrupt);
+                self.queued_user_messages.push_front(message);
+                self.refresh_queued_user_messages();
+            }
+        }
+
+        self.bottom_pane
+            .set_interrupt_intent(ComposerInterruptIntent::Add);
+        self.request_redraw();
+    }
+
+    fn classify_interrupt_submission(
+        &self,
+        mut user_message: UserMessage,
+    ) -> Option<InterruptSubmission> {
+        if user_message.text.is_empty() && user_message.image_paths.is_empty() {
+            return None;
+        }
+
+        let base_intent = self
+            .bottom_pane
+            .interrupt_intent()
+            .unwrap_or(ComposerInterruptIntent::Add);
+        let mut text_ref = user_message.text.trim();
+        let mut forced_interrupt = false;
+
+        match base_intent {
+            ComposerInterruptIntent::Add => {
+                if let Some(rest) = text_ref.strip_prefix('!') {
+                    forced_interrupt = true;
+                    text_ref = rest.trim_start();
+                }
+                if let Some(rest) = text_ref.strip_suffix('!') {
+                    forced_interrupt = true;
+                    text_ref = rest.trim_end();
+                }
+            }
+            ComposerInterruptIntent::Interrupt => {
+                if let Some(rest) = text_ref.strip_prefix('!') {
+                    text_ref = rest.trim_start();
+                }
+                if let Some(rest) = text_ref.strip_suffix('!') {
+                    text_ref = rest.trim_end();
+                }
+            }
+        }
+
+        user_message.text = text_ref.to_string();
+
+        let intent = if base_intent == ComposerInterruptIntent::Add && forced_interrupt {
+            ComposerInterruptIntent::Interrupt
+        } else {
+            base_intent
+        };
+
+        const ADD_PREFIX: &str = "before going further, know that the user also want to add that..";
+        const INTERRUPT_PREFIX: &str = "Wait , it seems the user have something more to say  :";
+
+        match intent {
+            ComposerInterruptIntent::Add => {
+                if user_message.text.is_empty() {
+                    user_message.text = ADD_PREFIX.to_string();
+                } else {
+                    user_message.text = format!("{ADD_PREFIX} {}", user_message.text);
+                }
+                Some(InterruptSubmission::Add(user_message))
+            }
+            ComposerInterruptIntent::Interrupt => {
+                if user_message.text.is_empty() {
+                    user_message.text = INTERRUPT_PREFIX.to_string();
+                } else {
+                    user_message.text = format!("{INTERRUPT_PREFIX} {}", user_message.text);
+                }
+                Some(InterruptSubmission::Interrupt(user_message))
+            }
+        }
     }
 
     pub(crate) fn maybe_post_pending_notification(&mut self, tui: &mut crate::tui::Tui) {

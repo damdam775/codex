@@ -40,6 +40,7 @@ pub(crate) enum CancellationEvent {
 }
 
 pub(crate) use chat_composer::ChatComposer;
+pub(crate) use chat_composer::ComposerInterruptIntent;
 pub(crate) use chat_composer::InputResult;
 use codex_protocol::custom_prompts::CustomPrompt;
 
@@ -379,6 +380,20 @@ impl BottomPane {
     pub(crate) fn set_custom_prompts(&mut self, prompts: Vec<CustomPrompt>) {
         self.composer.set_custom_prompts(prompts);
         self.request_redraw();
+    }
+
+    pub(crate) fn set_interrupt_mode(&mut self, enabled: bool) {
+        self.composer.set_interrupt_mode(enabled);
+        self.request_redraw();
+    }
+
+    pub(crate) fn set_interrupt_intent(&mut self, intent: ComposerInterruptIntent) {
+        self.composer.set_interrupt_intent(intent);
+        self.request_redraw();
+    }
+
+    pub(crate) fn interrupt_intent(&self) -> Option<ComposerInterruptIntent> {
+        self.composer.interrupt_intent()
     }
 
     pub(crate) fn composer_is_empty(&self) -> bool {
