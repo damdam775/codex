@@ -33,6 +33,19 @@ Then simply run `codex` to get started:
 codex
 ```
 
+If you'd like to build the Rust CLI from source instead, install Rust (via
+[`rustup`](https://rustup.rs/)) and then run:
+
+```shell
+cd codex-rs
+cargo install --locked --path cli
+codex --help
+```
+
+The `cargo install` command places the binary in Cargo's `bin` directory (e.g.
+`~/.cargo/bin` on Unix-like systems or `%USERPROFILE%\.cargo\bin` on Windows).
+Ensure that directory is on your `PATH`, then launch Codex with `codex`.
+
 <details>
 <summary>You can also go to the <a href="https://github.com/openai/codex/releases/latest">latest GitHub Release</a> and download the appropriate binary for your platform.</summary>
 
